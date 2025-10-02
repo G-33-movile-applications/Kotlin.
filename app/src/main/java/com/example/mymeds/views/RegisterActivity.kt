@@ -1,143 +1,228 @@
 package com.example.mymeds.views
 
-import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
-import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.activity.viewModels
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import coil.compose.rememberAsyncImagePainter
-import com.example.mymeds.viewModels.RegisterViewModel
 
 class RegisterActivity : ComponentActivity() {
-    private val registerViewModel: RegisterViewModel by viewModels()
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            RegisterScreen(registerViewModel)
+            RegisterScreen()
         }
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun RegisterScreen(viewModel: RegisterViewModel) {
-    val context = LocalContext.current
+fun RegisterScreen() {
+    // Campos
+    var name by remember { mutableStateOf("") }
+    var email by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var phone by remember { mutableStateOf("") }
+    var documentNumber by remember { mutableStateOf("") }
+    var address by remember { mutableStateOf("") }
+    var city by remember { mutableStateOf("") }
+    var state by remember { mutableStateOf("") }
+    var zipCode by remember { mutableStateOf("") }
 
-    // Campos del formulario
-    var name by rememberSaveable { mutableStateOf("") }
-    var email by rememberSaveable { mutableStateOf("") }
-    var password by rememberSaveable { mutableStateOf("") }
-    var phoneNumber by rememberSaveable { mutableStateOf("") }
-    var address by rememberSaveable { mutableStateOf("") }
-    var city by rememberSaveable { mutableStateOf("") }
-    var state by rememberSaveable { mutableStateOf("") }
-    var zipCode by rememberSaveable { mutableStateOf("") }
+    // Dropdown tipo documento
+    var docTypeExpanded by remember { mutableStateOf(false) }
+    var selectedDocType by remember { mutableStateOf("ID Card") }
+    val docTypes = listOf("ID Card", "Passport", "Driver License")
 
-    // Imágenes
-    var profilePictureUri by rememberSaveable { mutableStateOf<Uri?>(null) }
-    var idPictureUri by rememberSaveable { mutableStateOf<Uri?>(null) }
+    // Foto de perfil opcional
+    var profilePicUri by remember { mutableStateOf<Uri?>(null) }
 
-    val profilePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
-        profilePictureUri = uri
-    }
-
-    val idPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
-        idPictureUri = uri
-    }
+    // Checkboxes
+    var acceptTerms by remember { mutableStateOf(false) }
+    var acceptDataPolicy by remember { mutableStateOf(false) }
 
     Column(
-        modifier = Modifier.fillMaxSize().padding(16.dp),
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp)
+            .verticalScroll(rememberScrollState()), // 👈 Hace scrollable todo el formulario
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text("MyMeds", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        // Título
+        Text("Register", style = MaterialTheme.typography.headlineMedium)
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Campos de texto
-        OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Full Name") }, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(value = email, onValueChange = { email = it }, label = { Text("Email") }, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(value = password, onValueChange = { password = it }, label = { Text("Password") }, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(value = phoneNumber, onValueChange = { phoneNumber = it }, label = { Text("Phone Number (optional)") }, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(value = address, onValueChange = { address = it }, label = { Text("Address") }, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(value = city, onValueChange = { city = it }, label = { Text("City") }, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(value = state, onValueChange = { state = it }, label = { Text("State") }, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(value = zipCode, onValueChange = { zipCode = it }, label = { Text("Zip Code") }, modifier = Modifier.fillMaxWidth())
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // Subir foto de perfil
-        Text("Upload Profile Picture (optional)", fontWeight = FontWeight.Medium)
+        // Foto de perfil opcional
         Box(
             modifier = Modifier
-                .size(120.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .background(Color.Gray.copy(alpha = 0.3f))
-                .clickable { profilePicker.launch("image/*") },
+                .size(100.dp)
+                .clip(CircleShape)
+                .border(BorderStroke(2.dp, Color.Gray), CircleShape)
+                .clickable { /* TODO: abrir selector de imagen */ },
             contentAlignment = Alignment.Center
         ) {
-            profilePictureUri?.let {
+            if (profilePicUri != null) {
                 Image(
-                    painter = rememberAsyncImagePainter(it),
+                    painter = rememberAsyncImagePainter(profilePicUri),
                     contentDescription = "Profile Picture",
-                    modifier = Modifier.size(120.dp)
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
                 )
             }
         }
 
+        Text(
+            "Tap to upload profile picture (optional)",
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(top = 8.dp)
+        )
+
         Spacer(modifier = Modifier.height(16.dp))
 
+        // --- Campos de texto ---
+        OutlinedTextField(
+            value = name,
+            onValueChange = { name = it },
+            label = { Text("Full Name") },
+            modifier = Modifier.fillMaxWidth()
+        )
+        Spacer(modifier = Modifier.height(8.dp))
 
-        // Botón de registro
-        Button(
-            onClick = {
-                if (idPictureUri == null) {
-                    Toast.makeText(context, "ID Picture is required", Toast.LENGTH_SHORT).show()
-                } else {
-                    viewModel.register(
-                        name = name,
-                        email = email,
-                        password = password,
-                        phoneNumber = if (phoneNumber.isNotEmpty()) phoneNumber else null,
-                        profilePictureUri = profilePictureUri,
-                        idPictureUri = idPictureUri,
-                        address = address,
-                        city = city,
-                        state = state,
-                        zipCode = zipCode,
-                        context = context
-                    ) { success, message ->
-                        if (success) {
-                            Toast.makeText(context, "Register Successful", Toast.LENGTH_SHORT).show()
-                            context.startActivity(Intent(context, LoginActivity::class.java))
-                        } else {
-                            Toast.makeText(context, "Register Failed: $message", Toast.LENGTH_SHORT).show()
+        OutlinedTextField(
+            value = email,
+            onValueChange = { email = it },
+            label = { Text("Email") },
+            modifier = Modifier.fillMaxWidth()
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+
+        OutlinedTextField(
+            value = phone,
+            onValueChange = { phone = it },
+            label = { Text("Phone Number") },
+            modifier = Modifier.fillMaxWidth()
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // Dropdown tipo documento
+        ExposedDropdownMenuBox(
+            expanded = docTypeExpanded,
+            onExpandedChange = { docTypeExpanded = !docTypeExpanded }
+        ) {
+            OutlinedTextField(
+                value = selectedDocType,
+                onValueChange = {},
+                label = { Text("Document Type") },
+                readOnly = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+            ExposedDropdownMenu(
+                expanded = docTypeExpanded,
+                onDismissRequest = { docTypeExpanded = false }
+            ) {
+                docTypes.forEach { doc ->
+                    DropdownMenuItem(
+                        text = { Text(doc) },
+                        onClick = {
+                            selectedDocType = doc
+                            docTypeExpanded = false
                         }
-                    }
+                    )
                 }
-            },
-            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1A2247)),
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        OutlinedTextField(
+            value = documentNumber,
+            onValueChange = { documentNumber = it },
+            label = { Text("Document Number") },
+            modifier = Modifier.fillMaxWidth()
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+
+        OutlinedTextField(
+            value = address,
+            onValueChange = { address = it },
+            label = { Text("Address") },
+            modifier = Modifier.fillMaxWidth()
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+
+        OutlinedTextField(
+            value = city,
+            onValueChange = { city = it },
+            label = { Text("City") },
+            modifier = Modifier.fillMaxWidth()
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+
+        OutlinedTextField(
+            value = state,
+            onValueChange = { state = it },
+            label = { Text("State") },
+            modifier = Modifier.fillMaxWidth()
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+
+        OutlinedTextField(
+            value = zipCode,
+            onValueChange = { zipCode = it },
+            label = { Text("Zip Code") },
+            modifier = Modifier.fillMaxWidth()
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+
+        OutlinedTextField(
+            value = password,
+            onValueChange = { password = it },
+            label = { Text("Password") },
+            visualTransformation = PasswordVisualTransformation(),
+            modifier = Modifier.fillMaxWidth()
+        )
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Checkboxes
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(checked = acceptTerms, onCheckedChange = { acceptTerms = it })
+            Text("I accept the Terms and Conditions")
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(checked = acceptDataPolicy, onCheckedChange = { acceptDataPolicy = it })
+            Text("I agree to the Data Processing Policy")
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Botón
+        Button(
+            onClick = { /* TODO: lógica de registro */ },
+            enabled = acceptTerms && acceptDataPolicy,
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text("Create Account", color = Color.White)
+            Text("Register")
         }
+
+        Spacer(modifier = Modifier.height(32.dp)) // espacio final
     }
 }
+

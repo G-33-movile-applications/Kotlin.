@@ -48,7 +48,6 @@ fun LoginScreen(viewModel: LoginViewModel) {
     val context = LocalContext.current
 
     val primaryButtonColor = Color(0xFF1A2247)
-    val textFieldBackgroundColor = Color(0xFFFFF4DF)
 
     Column(
         modifier = Modifier
@@ -66,44 +65,40 @@ fun LoginScreen(viewModel: LoginViewModel) {
                 .padding(bottom = 32.dp)
         )
 
-
         // --- Email ---
-        TextField(
+        OutlinedTextField(
             value = email,
             onValueChange = { email = it },
             label = { Text("Email") },
-            colors = TextFieldDefaults.colors(
-                focusedContainerColor = textFieldBackgroundColor,
-                unfocusedContainerColor = textFieldBackgroundColor,
-                focusedIndicatorColor = Color.Transparent,
-                unfocusedIndicatorColor = Color.Transparent
-            ),
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(8.dp))
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth()
         )
 
-        Spacer(modifier = Modifier.height(24.dp))
+        Spacer(modifier = Modifier.height(16.dp))
 
         // --- Password ---
-        TextField(
+        OutlinedTextField(
             value = password,
             onValueChange = { password = it },
             label = { Text("Password") },
+            singleLine = true,
             visualTransformation = PasswordVisualTransformation(),
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-            colors = TextFieldDefaults.colors(
-                focusedContainerColor = textFieldBackgroundColor,
-                unfocusedContainerColor = textFieldBackgroundColor,
-                focusedIndicatorColor = Color.Transparent,
-                unfocusedIndicatorColor = Color.Transparent
-            ),
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(8.dp))
+            modifier = Modifier.fillMaxWidth()
         )
 
-        Spacer(modifier = Modifier.height(32.dp))
+        // --- Forgot Password ---
+        TextButton(
+            onClick = {
+                context.startActivity(Intent(context, PasswordResetActivity::class.java))
+            },
+            modifier = Modifier.align(Alignment.End)
+        ) {
+            Text("Forgot password?", color = Color(0xFF1A2247))
+        }
+
+
+        Spacer(modifier = Modifier.height(24.dp))
 
         // --- Login Button ---
         Button(
@@ -112,12 +107,10 @@ fun LoginScreen(viewModel: LoginViewModel) {
                     if (success) {
                         Toast.makeText(context, "Login successful", Toast.LENGTH_SHORT).show()
 
-                        // ✅ Guardar token en SharedPreferences (sin error de with)
                         val token = message ?: ""
                         val prefs = context.getSharedPreferences("MyMedsPrefs", Context.MODE_PRIVATE)
                         prefs.edit().putString("auth_token", token).apply()
 
-                        // Navegar a MainActivity
                         context.startActivity(Intent(context, MainActivity::class.java))
                     } else {
                         Toast.makeText(context, "Login failed: $message", Toast.LENGTH_LONG).show()

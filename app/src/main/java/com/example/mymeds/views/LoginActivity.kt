@@ -97,23 +97,15 @@ fun LoginScreen(viewModel: LoginViewModel) {
             Text("Forgot password?", color = Color(0xFF1A2247))
         }
 
-
         Spacer(modifier = Modifier.height(24.dp))
 
         // --- Login Button ---
         Button(
             onClick = {
                 viewModel.login(email, password) { success, message ->
+                    Toast.makeText(context, message, Toast.LENGTH_LONG).show()
                     if (success) {
-                        Toast.makeText(context, "Login successful", Toast.LENGTH_SHORT).show()
-
-                        val token = message ?: ""
-                        val prefs = context.getSharedPreferences("MyMedsPrefs", Context.MODE_PRIVATE)
-                        prefs.edit().putString("auth_token", token).apply()
-
                         context.startActivity(Intent(context, MainActivity::class.java))
-                    } else {
-                        Toast.makeText(context, "Login failed: $message", Toast.LENGTH_LONG).show()
                     }
                 }
             },

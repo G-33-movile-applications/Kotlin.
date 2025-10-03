@@ -3,18 +3,15 @@ package com.example.mymeds.viewModels
 import android.content.Context
 import android.net.Uri
 import androidx.lifecycle.ViewModel
-import androidx.lifecycle.viewModelScope
-import com.example.mymeds.remote.RetrofitClient
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import okhttp3.MediaType.Companion.toMediaTypeOrNull
-import okhttp3.MultipartBody
-import okhttp3.RequestBody.Companion.asRequestBody
-import okhttp3.RequestBody.Companion.toRequestBody // <-- NEW IMPORT for deprecated fix
-import java.io.File
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.storage.FirebaseStorage
 
 class RegisterViewModel : ViewModel() {
+
+    private val auth: FirebaseAuth = FirebaseAuth.getInstance()
+    private val firestore: FirebaseFirestore = FirebaseFirestore.getInstance()
+    private val storage: FirebaseStorage = FirebaseStorage.getInstance()
 
     fun register(
         context: Context,
@@ -26,8 +23,8 @@ class RegisterViewModel : ViewModel() {
         city: String,
         state: String,
         zipCode: String,
-        profilePictureUri: Uri?,
-        idPictureUri: Uri?,
+        profilePictureUri: Uri?, // 👈 opcional
+        idPictureUri: Uri?,      // 👈 obligatoria
         onResult: (Boolean, String) -> Unit
     ) {
         if (idPictureUri == null) {
@@ -35,75 +32,121 @@ class RegisterViewModel : ViewModel() {
             return
         }
 
-        viewModelScope.launch {
-            try {
-                val contentResolver = context.contentResolver
+        // 1. Crear usuario en Firebase Authentication
+        auth.createUserWithEmailAndPassword(email, password)
+            .addOnCompleteListener { authTask ->
+                if (authTask.isSuccessful) {
+                    val userId = auth.currentUser?.uid ?: return@addOnCompleteListener
 
-                // --- Helper function for file conversion (can be local or private) ---
-                fun uriToMultipart(uri: Uri?, paramName: String, fileName: String = "image.jpg"): MultipartBody.Part? {
-                    uri ?: return null
-                    val tempFile = File(context.cacheDir, "${paramName}_${System.currentTimeMillis()}.jpg")
-                    contentResolver.openInputStream(uri)?.use { input ->
-                        tempFile.outputStream().use { output -> input.copyTo(output) }
-                    } ?: return null
+                    // 2. Subir imágenes al Storage
+                    uploadImages(
+                        userId,
+                        profilePictureUri,
+                        idPictureUri,
+                        onUploadFinished = { profileUrl, idUrl ->
+                            if (idUrl == null) {
+                                onResult(false, "Failed to upload ID picture")
+                                return@uploadImages
+                            }
 
-                    val requestBody = tempFile.asRequestBody("image/jpeg".toMediaTypeOrNull())
-                    return MultipartBody.Part.createFormData(paramName, fileName, requestBody)
-                }
+                            // 3. Guardar datos en Firestore
+                            saveUserToFirestore(
+                                userId,
+                                name,
+                                email,
+                                phoneNumber,
+                                address,
+                                city,
+                                state,
+                                zipCode,
+                                profileUrl,
+                                idUrl,
+                                onResult
+                            )
+                        }
+                    )
 
-                // --- 2. Prepare Multipart Parts (Executed on IO thread) ---
-                // Explicitly define the return type (Pair) to fix "Unresolved reference 'first/second'"
-                val uriToMultipart: Pair<MultipartBody.Part?, MultipartBody.Part?> = withContext(Dispatchers.IO) {
-                    val profilePicturePart = uriToMultipart(profilePictureUri, "profile_picture")
-                    val idPicturePart = uriToMultipart(idPictureUri, "id_picture")
-
-                    if (idPicturePart == null) {
-                        // If mandatory ID picture fails, notify and return a null Pair to exit cleanly
-                        onResult(false, "Failed to prepare ID picture for upload.")
-                        return@withContext Pair(null, null)
-                    }
-
-                    // Successful return of the parts
-                    Pair(profilePicturePart, idPicturePart)
-                }
-
-                // If I/O failed and returned null Pair, exit the launch block
-                val idPicturePart = uriToMultipart.second
-                if (idPicturePart == null) return@launch // Exit if the mandatory part is missing
-
-                val profilePicturePart = uriToMultipart.first
-
-
-                // --- 3. Prepare String Data Map (Fixes Deprecation Warnings) ---
-                // Use string.toRequestBody() extension function
-                val textRequestBodyMap = mapOf(
-                    "name" to name.toRequestBody("text/plain".toMediaTypeOrNull()),
-                    "email" to email.toRequestBody("text/plain".toMediaTypeOrNull()),
-                    "password" to password.toRequestBody("text/plain".toMediaTypeOrNull()),
-                    "phone_number" to (phoneNumber ?: "").toRequestBody("text/plain".toMediaTypeOrNull()),
-                    "address" to address.toRequestBody("text/plain".toMediaTypeOrNull()),
-                    "city" to city.toRequestBody("text/plain".toMediaTypeOrNull()),
-                    "state" to state.toRequestBody("text/plain".toMediaTypeOrNull()),
-                    "zip_code" to zipCode.toRequestBody("text/plain".toMediaTypeOrNull())
-                )
-
-                // --- 4. Send the request to the backend ---
-                val response = RetrofitClient.instance.register(
-                    data = textRequestBodyMap,
-                    profilePicture = profilePicturePart,
-                    idPicture = idPicturePart // Now guaranteed non-null by the check above
-                )
-
-                // --- 5. Handle the response ---
-                if (response.isSuccessful) {
-                    onResult(true, "Registration successful!")
                 } else {
-                    val errorMessage = response.errorBody()?.string() ?: "Registration failed with status: ${response.code()}"
-                    onResult(false, errorMessage)
+                    onResult(false, authTask.exception?.message ?: "Registration failed")
                 }
-            } catch (e: Exception) {
-                onResult(false, e.message ?: "An unknown error occurred during registration.")
+            }
+    }
+
+    private fun uploadImages(
+        userId: String,
+        profilePictureUri: Uri?,
+        idPictureUri: Uri,
+        onUploadFinished: (profileUrl: String?, idUrl: String?) -> Unit
+    ) {
+        var profileUrl: String? = null
+        var idUrl: String? = null
+
+        // Subir perfil si existe
+        if (profilePictureUri != null) {
+            val refProfile = storage.reference.child("users/$userId/profile.jpg")
+            refProfile.putFile(profilePictureUri).continueWithTask {
+                refProfile.downloadUrl
+            }.addOnSuccessListener { uri ->
+                profileUrl = uri.toString()
+
+                // Cuando ya tengamos la de perfil e ID, avisamos
+                if (idUrl != null) {
+                    onUploadFinished(profileUrl, idUrl)
+                }
+            }.addOnFailureListener {
+                // si falla, igual seguimos porque es opcional
+                if (idUrl != null) {
+                    onUploadFinished(null, idUrl)
+                }
             }
         }
+
+        // Subir ID (obligatoria)
+        val refId = storage.reference.child("users/$userId/id.jpg")
+        refId.putFile(idPictureUri).continueWithTask {
+            refId.downloadUrl
+        }.addOnSuccessListener { uri ->
+            idUrl = uri.toString()
+
+            // Cuando tengamos ID y (si aplica) perfil
+            onUploadFinished(profileUrl, idUrl)
+        }.addOnFailureListener {
+            onUploadFinished(profileUrl, null)
+        }
+    }
+
+    private fun saveUserToFirestore(
+        userId: String,
+        name: String,
+        email: String,
+        phoneNumber: String?,
+        address: String,
+        city: String,
+        state: String,
+        zipCode: String,
+        profilePictureUrl: String?,
+        idPictureUrl: String,
+        onResult: (Boolean, String) -> Unit
+    ) {
+        val userMap = hashMapOf(
+            "name" to name,
+            "email" to email,
+            "phone_number" to (phoneNumber ?: ""),
+            "address" to address,
+            "city" to city,
+            "state" to state,
+            "zip_code" to zipCode,
+            "profile_picture" to profilePictureUrl,
+            "id_picture" to idPictureUrl
+        )
+
+        firestore.collection("users").document(userId)
+            .set(userMap)
+            .addOnSuccessListener {
+                onResult(true, "Registration successful!")
+            }
+            .addOnFailureListener { e ->
+                onResult(false, "Failed to save user data: ${e.message}")
+            }
     }
 }

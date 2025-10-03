@@ -8,6 +8,7 @@ import androidx.activity.viewModels
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -16,8 +17,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import com.example.mymeds.R
 import com.example.mymeds.models.PasswordResetRequest
@@ -51,7 +50,6 @@ fun PasswordResetScreen(viewModel: PasswordResetViewModel) {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Top
     ) {
-        // --- Logo ---
         Image(
             painter = painterResource(id = R.mipmap.ic_launcher_foreground),
             contentDescription = "App Logo",
@@ -66,19 +64,17 @@ fun PasswordResetScreen(viewModel: PasswordResetViewModel) {
             modifier = Modifier.padding(bottom = 16.dp)
         )
 
-        // --- Email ---
         OutlinedTextField(
             value = email,
             onValueChange = { email = it },
             label = { Text("Email") },
             singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+            keyboardOptions = KeyboardOptions.Default.copy(keyboardType = androidx.compose.ui.text.input.KeyboardType.Email),
             modifier = Modifier.fillMaxWidth()
         )
 
         Spacer(modifier = Modifier.height(24.dp))
 
-        // --- Send Button ---
         Button(
             onClick = {
                 viewModel.sendPasswordReset(
@@ -86,8 +82,8 @@ fun PasswordResetScreen(viewModel: PasswordResetViewModel) {
                 ) { success, message ->
                     Toast.makeText(context, message, Toast.LENGTH_LONG).show()
                     if (success) {
-                        // Opcional: cerrar pantalla y volver al login
-                        // (context as? Activity)?.finish()
+                        // Cierra pantalla y vuelve al login
+                        (context as? ComponentActivity)?.finish()
                     }
                 }
             },

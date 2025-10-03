@@ -2,6 +2,8 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.google.services)
+
 }
 
 android {
@@ -11,7 +13,7 @@ android {
     defaultConfig {
         applicationId = "com.example.mymeds"
         minSdk = 24
-        targetSdk = 36
+        targetSdk = 34
         versionCode = 1
         versionName = "1.0"
 
@@ -67,8 +69,21 @@ dependencies {
     // Navigation
     implementation(libs.navigation.compose)
 
-    // Coil
+    // Coil (para imágenes)
     implementation(libs.coil.compose)
+
+    // Firebase BOM (una sola línea gestiona versiones)
+    implementation(platform(libs.firebase.bom))
+
+    // Firebase KTX
+    implementation("com.google.firebase:firebase-auth")
+    implementation("com.google.firebase:firebase-analytics")
+    implementation("com.google.firebase:firebase-firestore")
+    implementation("com.google.firebase:firebase-storage")
+
+
+
+
 
     // Tests
     testImplementation(libs.junit)
@@ -78,4 +93,5 @@ dependencies {
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
+
 }

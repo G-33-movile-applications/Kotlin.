@@ -8,10 +8,13 @@ espressoCore = "3.7.0"
 lifecycleRuntimeKtx = "2.9.4"
 activityCompose = "1.11.0"
 composeBom = "2025.09.01"
-retrofit = "2.9.0"
-appcompat = "1.6.1"
-okhttp = "4.12.0"
-navigation = "2.8.5"
+
+
+# --- Extras que pediste ---
+retrofit = "3.0.0"
+appcompat = "1.7.1"
+okhttp = "5.1.0"
+navigation = "2.9.5"
 coil = "2.7.0"
 firebaseBom = "33.7.0"
 googleGmsServices = "4.4.2"
@@ -19,6 +22,10 @@ playServicesMaps = "19.0.0"
 mapsCompose = "4.3.3"
 lifecycleViewmodel = "2.9.4"
 composeMaterialIcons = "1.7.8"
+
+# --- Firebase ---
+firebase-bom = "33.1.0"
+googleServices = "4.4.3"
 
 [libraries]
 # AndroidX & Compose
@@ -67,8 +74,15 @@ navigation-compose = { group = "androidx.navigation", name = "navigation-compose
 # Coil
 coil-compose = { group = "io.coil-kt", name = "coil-compose", version.ref = "coil" }
 
+# Firebase (BOM maneja las versiones automáticamente)
+
+firebase-bom = { module = "com.google.firebase:firebase-bom", version.ref = "firebase-bom" }
+firebase-auth-ktx = { module = "com.google.firebase:firebase-auth-ktx" }
+firebase-firestore-ktx = { module = "com.google.firebase:firebase-firestore-ktx" }
+firebase-storage-ktx = { module = "com.google.firebase:firebase-storage-ktx" }
+
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
-google-gms-services = { id = "com.google.gms.google-services", version.ref = "googleGmsServices" }
+google-services = { id = "com.google.gms.google-services", version.ref = "googleServices" }

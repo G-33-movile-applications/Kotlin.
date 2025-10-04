@@ -1,26 +1,39 @@
 package com.example.mymeds.viewModels
 
 import androidx.lifecycle.ViewModel
-import androidx.lifecycle.viewModelScope
-import com.example.mymeds.models.LoginRequest
-import com.example.mymeds.remote.RetrofitClient
-import kotlinx.coroutines.launch
+import com.google.firebase.auth.FirebaseAuth
 
 class LoginViewModel : ViewModel() {
 
+    private val auth: FirebaseAuth = FirebaseAuth.getInstance()
+
     fun login(email: String, password: String, onResult: (Boolean, String?) -> Unit) {
-        viewModelScope.launch {
-            try {
-                val response = RetrofitClient.instance.login(LoginRequest(email, password))
-                if (response.isSuccessful) {
-                    // Devuelvo el token si la API lo envía
-                    onResult(true, response.body()?.token)
+        auth.signInWithEmailAndPassword(email, password)
+            .addOnCompleteListener { task ->
+                if (task.isSuccessful) {
+                    // ✅ Usuario autenticado correctamente
+                    val user = auth.currentUser
+                    onResult(true, user?.uid) // puedes devolver el UID o token
                 } else {
-                    onResult(false, response.errorBody()?.string() ?: "Login failed")
+                    // ❌ Falló el login
+                    onResult(false, task.exception?.message ?: "Login failed")
                 }
-            } catch (e: Exception) {
-                onResult(false, e.message ?: "Unknown error")
             }
-        }
+    }
+
+    fun register(email: String, password: String, onResult: (Boolean, String?) -> Unit) {
+        auth.createUserWithEmailAndPassword(email, password)
+            .addOnCompleteListener { task ->
+                if (task.isSuccessful) {
+                    val user = auth.currentUser
+                    onResult(true, user?.uid)
+                } else {
+                    onResult(false, task.exception?.message ?: "Register failed")
+                }
+            }
+    }
+
+    fun logout() {
+        auth.signOut()
     }
 }

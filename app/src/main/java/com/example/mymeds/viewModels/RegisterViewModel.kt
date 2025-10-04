@@ -29,7 +29,7 @@ class RegisterViewModel : ViewModel() {
                 if (authTask.isSuccessful) {
                     val userId = auth.currentUser?.uid ?: return@addOnCompleteListener
 
-                    // 2. Guardar datos en Firestore
+                    // 2. Preparar datos del usuario
                     val userMap = hashMapOf(
                         "uid" to userId,
                         "fullName" to fullName,
@@ -42,13 +42,22 @@ class RegisterViewModel : ViewModel() {
                         "createdAt" to Date()
                     )
 
+                    // 3. Guardar en colección "users"
                     firestore.collection("users").document(userId)
                         .set(userMap)
                         .addOnSuccessListener {
-                            onResult(true, "Usuario registrado correctamente")
+                            // 4. Guardar también en colección "usuarios"
+                            firestore.collection("usuarios").document(userId)
+                                .set(userMap)
+                                .addOnSuccessListener {
+                                    onResult(true, "Usuario registrado correctamente en ambas colecciones")
+                                }
+                                .addOnFailureListener { e ->
+                                    onResult(false, "Guardado en 'users' ok, pero error en 'usuarios': ${e.message}")
+                                }
                         }
                         .addOnFailureListener { e ->
-                            onResult(false, "Error al guardar en Firestore: ${e.message}")
+                            onResult(false, "Error al guardar en 'users': ${e.message}")
                         }
 
                 } else {

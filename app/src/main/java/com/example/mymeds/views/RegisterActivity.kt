@@ -68,7 +68,13 @@ fun RegisterScreen(viewModel: RegisterViewModel = viewModel()) {
             .verticalScroll(rememberScrollState()),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text("Register", style = MaterialTheme.typography.headlineMedium)
+        Text(
+            text = "REGISTER",
+            style = MaterialTheme.typography.headlineLarge,
+            color = Color(0xFF1A2247),
+            modifier = Modifier.padding(bottom = 24.dp)
+        )
+
 
         Spacer(modifier = Modifier.height(16.dp))
 

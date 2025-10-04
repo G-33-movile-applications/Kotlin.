@@ -24,7 +24,6 @@ lifecycleViewmodel = "2.9.4"
 composeMaterialIcons = "1.7.8"
 
 # --- Firebase ---
-firebase-bom = "33.1.0"
 googleServices = "4.4.3"
 
 [libraries]
@@ -76,9 +75,8 @@ coil-compose = { group = "io.coil-kt", name = "coil-compose", version.ref = "coi
 
 # Firebase (BOM maneja las versiones automáticamente)
 
-firebase-bom = { module = "com.google.firebase:firebase-bom", version.ref = "firebase-bom" }
+
 firebase-auth-ktx = { module = "com.google.firebase:firebase-auth-ktx" }
-firebase-firestore-ktx = { module = "com.google.firebase:firebase-firestore-ktx" }
 firebase-storage-ktx = { module = "com.google.firebase:firebase-storage-ktx" }
 
 [plugins]

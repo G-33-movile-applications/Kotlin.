@@ -2,6 +2,7 @@
 package com.example.mymeds.models
 
 import com.google.firebase.firestore.GeoPoint // Recommended for location data
+import com.google.firebase.firestore.PropertyName
 
 /**
  * Represents a physical point like a pharmacy or distribution center.
@@ -16,10 +17,13 @@ import com.google.firebase.firestore.GeoPoint // Recommended for location data
  * @property openingDays A list of days of the week it is open.
  */
 data class PhysicalPoint(
-    val name: String = "",
-    val address: String = "",
-    val chain: String = "",
-    val location: GeoPoint? = null,
-    val openingHours: List<String> = emptyList(),
-    val openingDays: List<String> = emptyList()
+    @PropertyName("nombre") val name: String = "",
+    @PropertyName("direccion") val address: String = "",
+    @PropertyName("latitud") val latitude: Double = 0.0,
+    @PropertyName("longitud") val longitude: Double = 0.0,
+    @PropertyName("cadena") val chain: String = "",
+    @PropertyName("diasAtencion") val openingHours: List<String> = emptyList(),
+    @PropertyName("horarioAtencion") val openingDays: List<String> = emptyList()
 )
+
+

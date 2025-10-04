@@ -1,6 +1,7 @@
 package com.example.mymeds.views
 
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -49,9 +50,8 @@ class HomeActivity : ComponentActivity() {
     }
 
     private fun navigateToMap() {
-        // Implementar navegación al mapa
-        // val intent = Intent(this, MapActivity::class.java)
-        // startActivity(intent)
+        val intent = Intent(this, MapActivity::class.java)
+        startActivity(intent)
     }
 
     private fun navigateToUploadPrescription() {

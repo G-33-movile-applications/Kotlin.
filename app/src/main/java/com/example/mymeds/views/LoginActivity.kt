@@ -105,7 +105,7 @@ fun LoginScreen(viewModel: LoginViewModel) {
                 viewModel.login(email, password) { success, message ->
                     Toast.makeText(context, message, Toast.LENGTH_LONG).show()
                     if (success) {
-                        context.startActivity(Intent(context, MainActivity::class.java))
+                        context.startActivity(Intent(context, HomeActivity::class.java))
                     }
                 }
             },

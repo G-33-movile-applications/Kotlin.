@@ -3,6 +3,19 @@
     xmlns:tools="http://schemas.android.com/tools"
     package="com.example.mymeds">
 
+    <!-- Permisos de Internet (necesario para cargar el mapa) -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Permisos de ubicación (para mostrar la ubicación del usuario) -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+
+    <!-- Feature de Google Maps (opcional pero recomendado) -->
+    <uses-feature
+        android:name="android.hardware.location.gps"
+        android:required="false" />
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -12,6 +25,11 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.MyMeds">
+
+        <!-- API Key de Google Maps -->
+        <meta-data
+            android:name="com.google.android.geo.API_KEY"
+            android:value="AIzaSyAeAshcyIaxXOjyu6ve5vbPaE7rCs1wF-Q" />
 
         <!-- LoginActivity será la primera pantalla -->
         <activity
@@ -30,17 +48,23 @@
             android:exported="true"
             android:theme="@style/Theme.MyMeds" />
 
-        <!-- Pantalla principal después del login -->
+        <!-- HomeActivity -->
         <activity
-            android:name=".MainActivity"
+            android:name=".views.HomeActivity"
             android:exported="true"
-            android:label="@string/app_name"
             android:theme="@style/Theme.MyMeds" />
 
-        <!-- 🔑 Pantalla de recuperación de contraseña -->
+        <!-- MapActivity -->
+        <activity
+            android:name=".views.MapActivity"
+            android:exported="true"
+            android:theme="@style/Theme.MyMeds" />
+
+        <!-- Pantalla de recuperación de contraseña -->
         <activity
             android:name=".views.PasswordResetActivity"
             android:exported="true"
             android:theme="@style/Theme.MyMeds" />
+
     </application>
 </manifest>

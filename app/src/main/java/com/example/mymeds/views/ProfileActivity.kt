@@ -1,7 +1,6 @@
 package com.example.mymeds.views
 
 import android.os.Bundle
-import android.widget.Toast
 import androidx.compose.runtime.getValue
 
 import androidx.activity.ComponentActivity
@@ -38,7 +37,6 @@ import com.example.mymeds.R
 import com.example.mymeds.viewModels.ProfileViewModel
 import kotlinx.coroutines.launch
 import com.example.mymeds.ui.theme.MyMedsTheme
-import android.util.Log
 
 class ProfileActivity : ComponentActivity() {
     private val profileViewModel: ProfileViewModel by viewModels()

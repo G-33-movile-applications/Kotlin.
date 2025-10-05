@@ -20,4 +20,14 @@ interface ApiService  {
 
     @POST("login/")
     suspend fun login(@Body request: LoginRequest): Response<LoginResponse>
+
+    @GET("profile/{email}")
+    suspend fun getProfile(@Path("email") userEmail: String): Response<UserProfileResponse>
+
+    @Multipart
+    @POST("profile/update")
+    suspend fun updateProfile(
+        @PartMap data: Map<String, @JvmSuppressWildcards RequestBody>,
+        @Part profilePicture: MultipartBody.Part? = null
+    ): Response<UserProfileResponse>
 }

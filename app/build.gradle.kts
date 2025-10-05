@@ -51,11 +51,6 @@ dependencies {
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
 
-    implementation("androidx.compose.runtime:runtime-livedata:1.6.7")
-    implementation("androidx.lifecycle:lifecycle-livedata-ktx:2.8.2")
-
-    implementation("androidx.compose.material:material-icons-extended:1.6.7")
-
     // Compose
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
@@ -98,7 +93,6 @@ dependencies {
     implementation("com.google.firebase:firebase-analytics")
     implementation("com.google.firebase:firebase-firestore")
     implementation("com.google.firebase:firebase-storage")
-
 
 
 

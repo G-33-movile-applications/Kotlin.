@@ -5,7 +5,6 @@ pluginManagement {
                 includeGroupByRegex("com\\.android.*")
                 includeGroupByRegex("com\\.google.*")
                 includeGroupByRegex("androidx.*")
-                includeGroupByRegex("com\\.google\\.firebase.*") // 👈 importante
             }
         }
         mavenCentral()
@@ -15,10 +14,11 @@ pluginManagement {
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
-        google()  // 👈 Asegúrate de tenerlo aquí
+        google()
         mavenCentral()
     }
 }
 
 rootProject.name = "My Meds"
 include(":app")
+ 

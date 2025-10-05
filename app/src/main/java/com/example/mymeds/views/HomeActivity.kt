@@ -61,10 +61,10 @@ class HomeActivity : ComponentActivity() {
     }
 
     private fun navigateToProfile() {
-        // Implementar navegación al perfil
-        // val intent = Intent(this, ProfileActivity::class.java)
-        // startActivity(intent)
+        val intent = Intent(this, ProfileActivity::class.java)
+        startActivity(intent)
     }
+
 
     private fun showNotifications() {
         // Implementar lógica de notificaciones

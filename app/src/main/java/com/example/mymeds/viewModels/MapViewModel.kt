@@ -1,6 +1,6 @@
-// File: com/example/mymeds/viewModels/MapViewModel.kt
 package com.example.mymeds.viewModels
 
+import android.util.Log
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.ViewModel
@@ -9,48 +9,48 @@ import com.example.mymeds.data.PhysicalPointsRepository
 import com.example.mymeds.models.PhysicalPoint
 import kotlinx.coroutines.launch
 
-/**
- * ViewModel for the Map Activity.
- * It is responsible for fetching data and preparing the state for the UI.
- */
 class MapViewModel : ViewModel() {
 
     private val repository = PhysicalPointsRepository()
 
-    // LiveData to expose the list of physical points to the Activity.
     private val _physicalPoints = MutableLiveData<List<PhysicalPoint>>()
     val physicalPoints: LiveData<List<PhysicalPoint>> = _physicalPoints
 
-    // LiveData to communicate the loading state (loading, error, etc.).
     private val _loadingState = MutableLiveData<LoadingState>()
     val loadingState: LiveData<LoadingState> = _loadingState
 
     init {
-        // When the ViewModel is created, start loading the points.
+        Log.d("MapViewModel", "ViewModel initialized")
         loadPhysicalPoints()
     }
 
-    /**
-     * Initiates the coroutine to fetch data from the repository.
-     */
     private fun loadPhysicalPoints() {
+        Log.d("MapViewModel", "Starting to load physical points")
         _loadingState.value = LoadingState.LOADING
+
         viewModelScope.launch {
-            val result = repository.getAllPhysicalPoints()
-            result.onSuccess { pointsList ->
-                _physicalPoints.value = pointsList
-                _loadingState.value = LoadingState.SUCCESS
-            }.onFailure {
-                // Here you could log the error: Log.e("MapViewModel", "Error fetching points", it)
+            try {
+                val result = repository.getAllPhysicalPoints()
+
+                result.onSuccess { pointsList ->
+                    Log.d("MapViewModel", "✓ Success! Loaded ${pointsList.size} points")
+                    pointsList.forEachIndexed { index, point ->
+                        Log.d("MapViewModel", "Point $index: ${point.name} (${point.latitude}, ${point.longitude})")
+                    }
+                    _physicalPoints.value = pointsList
+                    _loadingState.value = LoadingState.SUCCESS
+                }.onFailure { exception ->
+                    Log.e("MapViewModel", "✗ Error loading points: ${exception.message}", exception)
+                    _loadingState.value = LoadingState.ERROR
+                }
+            } catch (e: Exception) {
+                Log.e("MapViewModel", "✗ Exception: ${e.message}", e)
                 _loadingState.value = LoadingState.ERROR
             }
         }
     }
 }
 
-/**
- * Enum to represent the different states of data loading.
- */
 enum class LoadingState {
     LOADING,
     SUCCESS,

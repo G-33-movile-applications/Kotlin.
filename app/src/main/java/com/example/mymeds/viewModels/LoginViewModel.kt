@@ -12,11 +12,12 @@ class LoginViewModel : ViewModel() {
             .addOnCompleteListener { task ->
                 if (task.isSuccessful) {
                     // ✅ Usuario autenticado correctamente
-                    val user = auth.currentUser
-                    onResult(true, user?.uid) // puedes devolver el UID o token
+                    // Nunca mostramos ni devolvemos el UID ni el token
+                    onResult(true, "Login successful")
                 } else {
                     // ❌ Falló el login
-                    onResult(false, task.exception?.message ?: "Login failed")
+                    val message = task.exception?.localizedMessage ?: "Login failed"
+                    onResult(false, message)
                 }
             }
     }
@@ -25,10 +26,10 @@ class LoginViewModel : ViewModel() {
         auth.createUserWithEmailAndPassword(email, password)
             .addOnCompleteListener { task ->
                 if (task.isSuccessful) {
-                    val user = auth.currentUser
-                    onResult(true, user?.uid)
+                    onResult(true, "User registered successfully")
                 } else {
-                    onResult(false, task.exception?.message ?: "Register failed")
+                    val message = task.exception?.localizedMessage ?: "Register failed"
+                    onResult(false, message)
                 }
             }
     }

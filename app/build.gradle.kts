@@ -55,7 +55,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-livedata-ktx:2.8.2")
 
     implementation("androidx.compose.material:material-icons-extended:1.6.7")
-
+    implementation("com.google.android.gms:play-services-mlkit-text-recognition:19.0.0")
     // Compose
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
@@ -98,10 +98,7 @@ dependencies {
     implementation("com.google.firebase:firebase-analytics")
     implementation("com.google.firebase:firebase-firestore")
     implementation("com.google.firebase:firebase-storage")
-
-
-
-
+    implementation(libs.vision.common)
 
 
     // Tests

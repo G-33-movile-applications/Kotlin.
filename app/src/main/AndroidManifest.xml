@@ -11,11 +11,13 @@
     <!-- Permisos de ubicación (para mostrar la ubicación del usuario) -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.NFC" />
 
     <!-- Feature de Google Maps (opcional pero recomendado) -->
     <uses-feature
         android:name="android.hardware.location.gps"
         android:required="false" />
+    <uses-feature android:name="android.hardware.nfc" android:required="false" />
 
     <application
         android:allowBackup="true"
@@ -72,5 +74,22 @@
             android:name=".views.ProfileActivity"
             android:exported="true"
             android:theme="@style/Theme.MyMeds" />
+
+        <!-- Subir prescripción (Home) -->
+        <activity android:name=".views.UploadPrescriptionActivity"
+            android:exported="true"
+            android:theme="@style/Theme.MyMeds"/>
+
+        <!-- NFC (usa enableReaderMode; sin filters) -->
+        <activity android:name=".views.UploadByNfcActivity"
+            android:exported="true"
+            android:theme="@style/Theme.MyMeds"/>
+        <!-- Imagen y PDF -->
+        <activity android:name=".views.UploadPrescriptionPhotoActivity"
+            android:exported="true"
+            android:theme="@style/Theme.MyMeds"/>
+        <activity android:name=".views.UploadPrescriptionPDFActivity"
+            android:exported="true"
+            android:theme="@style/Theme.MyMeds"/>
     </application>
 </manifest>

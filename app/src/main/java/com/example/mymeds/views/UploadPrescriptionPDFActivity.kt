@@ -6,6 +6,7 @@ import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
+import android.provider.OpenableColumns // Necesaria para obtener el nombre del archivo
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -16,6 +17,11 @@ import androidx.activity.viewModels
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.shape.RoundedCornerShape // <-- Importación para el diseño
+import androidx.compose.material.icons.Icons // <-- Importación para los iconos
+import androidx.compose.material.icons.filled.Add // <-- Importación para el icono '+'
+import androidx.compose.material.icons.filled.Description // <-- Importación para el icono de documento
+import androidx.compose.material.icons.filled.FileUpload // <-- Importación para el icono de subida
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -62,6 +68,7 @@ class PdfOcrUploadViewModel : ViewModel() {
     fun runOcrFromPdf(context: Activity, uri: Uri, onError: (String) -> Unit) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
+                // ... (Se mantiene la lógica de OCR del PDF)
                 val temp = copyToTempFile(context, uri, "rx_${System.currentTimeMillis()}.pdf")
                 val pfd = ParcelFileDescriptor.open(temp, ParcelFileDescriptor.MODE_READ_ONLY)
                 val renderer = PdfRenderer(pfd)
@@ -74,7 +81,7 @@ class PdfOcrUploadViewModel : ViewModel() {
                         page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
                         val result = recognizer.process(InputImage.fromBitmap(bmp, 0)).await()
                         if (result.text.isNotBlank()) {
-                            sb.appendLine("— Page ${i + 1} —")
+                            sb.appendLine("— Página ${i + 1} —")
                             sb.appendLine(result.text)
                             sb.appendLine()
                         }
@@ -85,7 +92,7 @@ class PdfOcrUploadViewModel : ViewModel() {
                 extractedText = sb.toString().ifBlank { null }
             } catch (e: Exception) {
                 extractedText = null
-                onError(e.message ?: "OCR failed")
+                onError(e.message ?: "Falló el OCR")
             }
         }
     }
@@ -134,6 +141,7 @@ private fun UploadPrescriptionPDFScreen(vm: PdfOcrUploadViewModel, finish: () ->
     var pdfUri by remember { mutableStateOf<Uri?>(null) }
     val scroll = rememberScrollState()
 
+    // Launcher para seleccionar PDF
     val pickPdf = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent()
     ) { uri ->
@@ -142,57 +150,163 @@ private fun UploadPrescriptionPDFScreen(vm: PdfOcrUploadViewModel, finish: () ->
             vm.runOcrFromPdf(activity, uri) {
                 Toast.makeText(ctx, it, Toast.LENGTH_SHORT).show()
             }
+        } else {
+            pdfUri = null // Limpiar si la selección se cancela
         }
     }
 
-    vm.uploadPdf(activity!!, pdfUri!!) { ok, msg ->
-        Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show()
-        if (ok) finish()
-    }
+    // Código original eliminado: la llamada a vm.uploadPdf no debe estar aquí.
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Cargar Prescripción por PDF", fontWeight = FontWeight.Bold) }
+                title = { Text("Cargar Prescripción por PDF", fontWeight = FontWeight.Bold) },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer
+                )
             )
         }
     ) { pad ->
         Column(
             Modifier
                 .padding(pad)
-                .padding(16.dp)
                 .fillMaxSize()
                 .verticalScroll(scroll),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Button(
-                onClick = { pickPdf.launch("application/pdf") },
-                modifier = Modifier.fillMaxWidth()
-            ) { Text("Seleccionar PDF") }
 
             Spacer(Modifier.height(16.dp))
 
-            Text("Texto detectado", style = MaterialTheme.typography.titleMedium)
-            Text(
-                vm.extractedText ?: "—",
-                modifier = Modifier.fillMaxWidth().padding(top = 4.dp)
-            )
+            // TARJETA DE SELECCIÓN DE ARCHIVO (Clickable)
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 200.dp)
+                    .padding(horizontal = 16.dp),
+                shape = RoundedCornerShape(16.dp),
+                elevation = CardDefaults.cardElevation(defaultElevation = 4.dp),
+                // Al hacer click, redirige a los archivos del celular
+                onClick = { pickPdf.launch("application/pdf") }
+            ) {
+                Box(
+                    modifier = Modifier.fillMaxSize().padding(16.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        if (pdfUri != null) {
+                            // Muestra el nombre del archivo seleccionado y un ícono de documento
+                            Icon(
+                                Icons.Filled.Description,
+                                contentDescription = "PDF Seleccionado",
+                                modifier = Modifier.size(48.dp),
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(Modifier.height(8.dp))
+
+                            // Intenta obtener el nombre del archivo
+                            val fileName: String = remember(pdfUri) {
+                                runCatching {
+                                    val cursor = ctx.contentResolver.query(pdfUri!!, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                                    cursor?.use { if (it.moveToFirst()) it.getString(it.getColumnIndexOrThrow(OpenableColumns.DISPLAY_NAME)) else pdfUri!!.lastPathSegment }
+                                }.getOrDefault("Documento PDF") as String
+                            }
+                            Text(
+                                fileName,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text("Click para cambiar", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        } else {
+                            // Icono grande de "más" para seleccionar
+                            Icon(
+                                Icons.Filled.Add,
+                                contentDescription = "Seleccionar Archivo",
+                                modifier = Modifier.size(64.dp),
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                "Toca para seleccionar el archivo PDF",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
 
             Spacer(Modifier.height(16.dp))
 
+            // TARJETA DE TEXTO DETECTADO (OCR) - FIX de nulidad aplicado aquí
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                shape = RoundedCornerShape(12.dp),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp)
+                ) {
+                    Text(
+                        "📝 Texto Detectado (OCR):",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(bottom = 4.dp)
+                    )
+                    Divider()
+                    Spacer(Modifier.height(8.dp))
+
+                    // CORRECCIÓN DE NULIDAD: Muestra el texto o un mensaje si es nulo/vacío
+                    val displayText = vm.extractedText
+                    val message = if (displayText.isNullOrBlank()) {
+                        "No se detectó texto o el PDF está pendiente."
+                    } else {
+                        displayText
+                    }
+
+                    Text(
+                        message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (displayText.isNullOrBlank()) MaterialTheme.colorScheme.outline else MaterialTheme.colorScheme.onSurface
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(24.dp))
+
+            // BOTÓN DE SUBIR
             Button(
                 enabled = pdfUri != null && !vm.uploading,
                 onClick = {
-                    vm.uploadPdf(ctx, pdfUri!!) { ok, msg ->
-                        Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show()
-                        if (ok) finish()
+                    val u = pdfUri
+                    if (u != null && activity != null) {
+                        vm.uploadPdf(activity, u) { ok, msg ->
+                            Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show()
+                            if (ok) finish()
+                        }
                     }
                 },
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(56.dp)
+                    .padding(horizontal = 16.dp),
+                shape = RoundedCornerShape(12.dp)
             ) {
-                if (vm.uploading) CircularProgressIndicator(strokeWidth = 2.dp)
-                else Text("Subir prescripción")
+                if (vm.uploading) {
+                    CircularProgressIndicator(
+                        strokeWidth = 3.dp,
+                        color = MaterialTheme.colorScheme.onPrimary,
+                        modifier = Modifier.size(24.dp)
+                    )
+                } else {
+                    Icon(Icons.Filled.FileUpload, contentDescription = "Subir")
+                    Spacer(Modifier.width(8.dp))
+                    Text("Subir Prescripción PDF")
+                }
             }
+            Spacer(Modifier.height(16.dp))
         }
     }
 }

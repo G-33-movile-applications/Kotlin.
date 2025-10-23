@@ -55,9 +55,8 @@ class HomeActivity : ComponentActivity() {
     }
 
     private fun navigateToUploadPrescription() {
-        // Implementar navegación a subir prescripción
-        // val intent = Intent(this, UploadPrescriptionActivity::class.java)
-        // startActivity(intent)
+        val intent = Intent(this, UploadPrescriptionActivity::class.java)
+        startActivity(intent)
     }
 
     private fun navigateToProfile() {

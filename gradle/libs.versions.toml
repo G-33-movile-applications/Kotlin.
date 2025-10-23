@@ -25,6 +25,7 @@ composeMaterialIcons = "1.7.8"
 
 # --- Firebase ---
 googleServices = "4.4.3"
+visionCommon = "17.3.0"
 
 [libraries]
 # AndroidX & Compose
@@ -78,6 +79,7 @@ coil-compose = { group = "io.coil-kt", name = "coil-compose", version.ref = "coi
 
 firebase-auth-ktx = { module = "com.google.firebase:firebase-auth-ktx" }
 firebase-storage-ktx = { module = "com.google.firebase:firebase-storage-ktx" }
+vision-common = { group = "com.google.mlkit", name = "vision-common", version.ref = "visionCommon" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

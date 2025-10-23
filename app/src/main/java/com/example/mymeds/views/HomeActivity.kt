@@ -1,6 +1,5 @@
 package com.example.mymeds.views
 
-
 import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -11,7 +10,11 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ExitToApp
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Place
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -23,6 +26,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.mymeds.ui.theme.MyMedsTheme
 import androidx.compose.ui.tooling.preview.Preview
+import com.google.firebase.auth.FirebaseAuth
 
 class HomeActivity : ComponentActivity() {
 
@@ -32,18 +36,11 @@ class HomeActivity : ComponentActivity() {
         setContent {
             MyMedsTheme {
                 HomeScreen(
-                    onMapClick = {
-                        navigateToMap()
-                    },
-                    onUploadPrescriptionClick = {
-                        navigateToUploadPrescription()
-                    },
-                    onProfileClick = {
-                        navigateToProfile()
-                    },
-                    onNotificationsClick = {
-                        showNotifications()
-                    }
+                    onMapClick = { navigateToMap() },
+                    onUploadPrescriptionClick = { navigateToUploadPrescription() },
+                    onProfileClick = { navigateToProfile() },
+                    onNotificationsClick = { showNotifications() },
+                    onLogoutClick = { logout() }
                 )
             }
         }
@@ -64,9 +61,15 @@ class HomeActivity : ComponentActivity() {
         startActivity(intent)
     }
 
-
     private fun showNotifications() {
         // Implementar lógica de notificaciones
+    }
+
+    private fun logout() {
+        FirebaseAuth.getInstance().signOut()
+        // Cambia LoginActivity por el nombre real de tu pantalla de login si difiere
+        startActivity(Intent(this, LoginActivity::class.java))
+        finish()
     }
 }
 
@@ -76,7 +79,8 @@ fun HomeScreen(
     onMapClick: () -> Unit = {},
     onUploadPrescriptionClick: () -> Unit = {},
     onProfileClick: () -> Unit = {},
-    onNotificationsClick: () -> Unit = {}
+    onNotificationsClick: () -> Unit = {},
+    onLogoutClick: () -> Unit = {}
 ) {
     Scaffold(
         topBar = {
@@ -89,20 +93,19 @@ fun HomeScreen(
                         color = Color.White
                     )
                 },
-                navigationIcon = {
-                    IconButton(onClick = { /* Menú */ }) {
-                        Icon(
-                            imageVector = Icons.Default.Menu,
-                            contentDescription = "Menú",
-                            tint = Color.White
-                        )
-                    }
-                },
+                // ❌ Sin navigationIcon (menú hamburguesa eliminado)
                 actions = {
                     IconButton(onClick = onNotificationsClick) {
                         Icon(
-                            imageVector = Icons.Default.Notifications,
+                            imageVector = Icons.Filled.Notifications,
                             contentDescription = "Notificaciones",
+                            tint = Color.White
+                        )
+                    }
+                    IconButton(onClick = onLogoutClick) {
+                        Icon(
+                            imageVector = Icons.Filled.ExitToApp, // usa Icons.Default.Logout si lo tienes
+                            contentDescription = "Cerrar sesión",
                             tint = Color.White
                         )
                     }
@@ -125,7 +128,7 @@ fun HomeScreen(
             FunctionalityCard(
                 title = "Ver mapa de farmacias",
                 description = "Encuentra sucursales EPS cercanas, horarios y stock estimado.",
-                icon = Icons.Default.Place,
+                icon = Icons.Filled.Place,
                 buttonText = "Abrir mapa",
                 onClick = onMapClick
             )
@@ -135,7 +138,7 @@ fun HomeScreen(
             FunctionalityCard(
                 title = "Sube tu prescripción",
                 description = "Escanea o carga la fórmula para validar y agilizar tu pedido.",
-                icon = Icons.Default.Add,
+                icon = Icons.Filled.Add,
                 buttonText = "Subir",
                 onClick = onUploadPrescriptionClick
             )
@@ -145,7 +148,7 @@ fun HomeScreen(
             FunctionalityCard(
                 title = "Ver tu perfil",
                 description = "Datos del usuario, preferencias y accesibilidad.",
-                icon = Icons.Default.Person,
+                icon = Icons.Filled.Person,
                 buttonText = "Ver perfil",
                 onClick = onProfileClick,
                 isAccount = true
@@ -247,17 +250,10 @@ fun FunctionalityCard(
     }
 }
 
-
 @Preview(showBackground = true, showSystemUi = true)
 @Composable
 fun HomeScreenPreview() {
     MyMedsTheme {
-        HomeScreen(
-            onMapClick = {},
-            onUploadPrescriptionClick = {},
-            onProfileClick = {},
-            onNotificationsClick = {}
-        )
+        HomeScreen()
     }
 }
-

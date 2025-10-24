@@ -1,11 +1,30 @@
 package com.example.mymeds.models
 
+import com.google.firebase.firestore.GeoPoint
+import com.google.firebase.firestore.PropertyName
+
 data class PhysicalPoint(
-    val name: String = "",
-    val address: String = "",
-    val latitude: Double = 0.0,
-    val longitude: Double = 0.0,
-    val chain: String = "",
-    val openingHours: List<String> = emptyList(),
-    val openingDays: List<String> = emptyList()
+    @get:PropertyName("nombre")
+    @set:PropertyName("nombre")
+    var name: String = "",
+
+    @get:PropertyName("direccion")
+    @set:PropertyName("direccion")
+    var address: String = "",
+
+    @get:PropertyName("ubicacion")
+    @set:PropertyName("ubicacion")
+    var location: GeoPoint = GeoPoint(0.0, 0.0),
+
+    @get:PropertyName("horario")
+    @set:PropertyName("horario")
+    var openingHours: String = "",
+
+    @get:PropertyName("localidad")
+    @set:PropertyName("localidad")
+    var locality: String = "",
+
+    @get:PropertyName("telefono")
+    @set:PropertyName("telefono")
+    var phone: String = ""
 )

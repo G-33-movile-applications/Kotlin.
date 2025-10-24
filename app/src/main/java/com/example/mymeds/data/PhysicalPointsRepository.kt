@@ -3,15 +3,16 @@ package com.example.mymeds.data
 import android.util.Log
 import com.example.mymeds.models.PhysicalPoint
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.GeoPoint
 import kotlinx.coroutines.tasks.await
 
 class PhysicalPointsRepository {
 
-    private val pointsCollection = FirebaseFirestore.getInstance().collection("puntos_fisicos")
+    private val pointsCollection = FirebaseFirestore.getInstance().collection("puntosFisicos")
 
     suspend fun getAllPhysicalPoints(): Result<List<PhysicalPoint>> {
         return try {
-            Log.d("Repository", "Fetching from Firestore collection: puntos_fisicos")
+            Log.d("Repository", "Fetching from Firestore collection: puntosFisicos")
 
             val documents = pointsCollection.get().await()
 
@@ -19,32 +20,22 @@ class PhysicalPointsRepository {
 
             val pointsList = documents.documents.mapNotNull { doc ->
                 try {
-                    // Extraer los campos exactamente como están en Firestore
                     val nombre = doc.getString("nombre") ?: ""
                     val direccion = doc.getString("direccion") ?: ""
-                    val latitud = doc.getDouble("latitud") ?: 0.0
-                    val longitud = doc.getDouble("longitud") ?: 0.0
-                    val cadena = doc.getString("cadena") ?: ""
+                    val ubicacion = doc.getGeoPoint("ubicacion") ?: GeoPoint(0.0, 0.0)
+                    val horario = doc.getString("horario") ?: ""
+                    val localidad = doc.getString("localidad") ?: ""
+                    val telefono = doc.getString("telefono") ?: ""
 
-                    // Extraer listas de forma segura
-                    val horarioAtencion = (doc.get("horarioAtencion") as? List<*>)
-                        ?.mapNotNull { it as? String }
-                        ?: emptyList()
-
-                    val diasAtencion = (doc.get("diasAtencion") as? List<*>)
-                        ?.mapNotNull { it as? String }
-                        ?: emptyList()
-
-                    Log.d("Repository", "Processing: $nombre at ($latitud, $longitud)")
+                    Log.d("Repository", "Processing: $nombre at (${ubicacion.latitude}, ${ubicacion.longitude})")
 
                     PhysicalPoint(
                         name = nombre,
                         address = direccion,
-                        latitude = latitud,
-                        longitude = longitud,
-                        chain = cadena,
-                        openingHours = horarioAtencion,
-                        openingDays = diasAtencion
+                        location = ubicacion,
+                        openingHours = horario,
+                        locality = localidad,
+                        phone = telefono
                     )
                 } catch (e: Exception) {
                     Log.e("Repository", "Error mapping document ${doc.id}: ${e.message}", e)
@@ -54,7 +45,7 @@ class PhysicalPointsRepository {
 
             Log.d("Repository", "Successfully converted ${pointsList.size} points")
             pointsList.forEachIndexed { index, point ->
-                Log.d("Repository", "Point $index: ${point.name} at (${point.latitude}, ${point.longitude})")
+                Log.d("Repository", "Point $index: ${point.name} at (${point.location.latitude}, ${point.location.longitude})")
             }
 
             Result.success(pointsList)

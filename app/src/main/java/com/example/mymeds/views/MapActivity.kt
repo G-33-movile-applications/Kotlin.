@@ -1,28 +1,40 @@
 package com.example.mymeds.views
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.livedata.observeAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import com.example.mymeds.models.PhysicalPoint
 import com.example.mymeds.viewModels.MapViewModel
 import com.example.mymeds.viewModels.LoadingState
 import com.example.mymeds.ui.theme.MyMedsTheme
+import com.example.mymeds.utils.LocationUtils
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
 import com.google.android.gms.maps.model.CameraPosition
 import com.google.android.gms.maps.model.LatLng
+import com.google.android.gms.tasks.CancellationTokenSource
 import com.google.maps.android.compose.*
 
 class MapActivity : ComponentActivity() {
@@ -46,15 +58,68 @@ class MapActivity : ComponentActivity() {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MapScreen(viewModel: MapViewModel, onBackClick: () -> Unit) {
+    val context = LocalContext.current
     val points by viewModel.physicalPoints.observeAsState(initial = emptyList())
+    val nearestPharmacies by viewModel.nearestPharmacies.observeAsState(initial = emptyList())
+    val userLocation by viewModel.userLocation.observeAsState()
     val loadingState by viewModel.loadingState.observeAsState(initial = LoadingState.LOADING)
 
-    val uniandes = LatLng(4.601485, -74.066445)
+    var selectedPoint by remember { mutableStateOf<PhysicalPoint?>(null) }
+    var hasLocationPermission by remember { mutableStateOf(false) }
+
+    val defaultLocation = LatLng(4.601485, -74.066445) // Uniandes como fallback
     val cameraPositionState = rememberCameraPositionState {
-        position = CameraPosition.fromLatLngZoom(uniandes, 15f)
+        position = CameraPosition.fromLatLngZoom(userLocation ?: defaultLocation, 15f)
     }
 
-    var selectedPoint by remember { mutableStateOf<PhysicalPoint?>(null) }
+    // Actualizar cámara cuando cambie la ubicación del usuario
+    LaunchedEffect(userLocation) {
+        userLocation?.let { location ->
+            cameraPositionState.position = CameraPosition.fromLatLngZoom(location, 15f)
+        }
+    }
+
+    // Launcher para permisos de ubicación
+    val locationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val granted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
+                permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+
+        hasLocationPermission = granted
+
+        if (granted) {
+            getCurrentLocation(context, viewModel)
+        } else {
+            Log.e("MapScreen", "Location permission denied")
+        }
+    }
+
+    // Verificar permisos al cargar
+    LaunchedEffect(Unit) {
+        val hasFineLocation = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+
+        val hasCoarseLocation = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.ACCESS_COARSE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+
+        hasLocationPermission = hasFineLocation || hasCoarseLocation
+
+        if (hasLocationPermission) {
+            getCurrentLocation(context, viewModel)
+        } else {
+            locationPermissionLauncher.launch(
+                arrayOf(
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+                )
+            )
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -70,6 +135,28 @@ fun MapScreen(viewModel: MapViewModel, onBackClick: () -> Unit) {
                 navigationIcon = {
                     IconButton(onClick = onBackClick) {
                         Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = Color.White)
+                    }
+                },
+                actions = {
+                    IconButton(
+                        onClick = {
+                            if (hasLocationPermission) {
+                                getCurrentLocation(context, viewModel)
+                            } else {
+                                locationPermissionLauncher.launch(
+                                    arrayOf(
+                                        Manifest.permission.ACCESS_FINE_LOCATION,
+                                        Manifest.permission.ACCESS_COARSE_LOCATION
+                                    )
+                                )
+                            }
+                        }
+                    ) {
+                        Icon(
+                            Icons.Default.MyLocation,
+                            contentDescription = "My Location",
+                            tint = Color.White
+                        )
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFF6B9BD8))
@@ -97,13 +184,33 @@ fun MapScreen(viewModel: MapViewModel, onBackClick: () -> Unit) {
                 LoadingState.SUCCESS -> {
                     GoogleMap(
                         modifier = Modifier.fillMaxSize(),
-                        cameraPositionState = cameraPositionState
+                        cameraPositionState = cameraPositionState,
+                        properties = MapProperties(isMyLocationEnabled = hasLocationPermission)
                     ) {
-                        points.forEach { point ->
+                        // Marcador del usuario
+                        userLocation?.let { location ->
                             Marker(
-                                state = MarkerState(position = LatLng(point.latitude, point.longitude)),
+                                state = MarkerState(position = location),
+                                title = "Tu ubicación",
+                                icon = com.google.android.gms.maps.model.BitmapDescriptorFactory
+                                    .defaultMarker(com.google.android.gms.maps.model.BitmapDescriptorFactory.HUE_AZURE)
+                            )
+                        }
+
+                        // Marcadores de farmacias
+                        points.forEach { point ->
+                            val isNearby = nearestPharmacies.any { it.first == point }
+                            val color = if (isNearby) {
+                                com.google.android.gms.maps.model.BitmapDescriptorFactory.HUE_GREEN
+                            } else {
+                                com.google.android.gms.maps.model.BitmapDescriptorFactory.HUE_RED
+                            }
+
+                            Marker(
+                                state = MarkerState(position = LatLng(point.location.latitude, point.location.longitude)),
                                 title = point.name,
                                 snippet = point.address,
+                                icon = com.google.android.gms.maps.model.BitmapDescriptorFactory.defaultMarker(color),
                                 onClick = {
                                     selectedPoint = point
                                     true
@@ -112,8 +219,18 @@ fun MapScreen(viewModel: MapViewModel, onBackClick: () -> Unit) {
                         }
                     }
 
-                    // Bottom panel with selected point info
+                    // Panel inferior con información
                     selectedPoint?.let { point ->
+                        val distanceText = userLocation?.let { location ->
+                            val distance = LocationUtils.calculateDistance(
+                                location.latitude,
+                                location.longitude,
+                                point.location.latitude,
+                                point.location.longitude
+                            )
+                            " • ${LocationUtils.formatDistance(distance)}"
+                        } ?: ""
+
                         Card(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -127,12 +244,31 @@ fun MapScreen(viewModel: MapViewModel, onBackClick: () -> Unit) {
                                 modifier = Modifier.padding(16.dp),
                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
-                                Text(point.name, fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                                Text(point.address, fontSize = 14.sp, color = Color.Gray)
-                                Text("Chain: ${point.chain}", fontSize = 14.sp, color = Color.DarkGray)
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        point.name,
+                                        fontSize = 20.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    if (distanceText.isNotEmpty()) {
+                                        Text(
+                                            distanceText,
+                                            fontSize = 14.sp,
+                                            color = Color(0xFF6B9BD8),
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
 
-                                Text("Schedule: ${point.openingHours.joinToString()}")
-                                Text("Days: ${point.openingDays.joinToString()}")
+                                Text(point.address, fontSize = 14.sp, color = Color.Gray)
+                                Text("Localidad: ${point.locality}", fontSize = 14.sp, color = Color.DarkGray)
+                                Text("Horario: ${point.openingHours}", fontSize = 14.sp, color = Color.DarkGray)
+                                if (point.phone.isNotEmpty()) {
+                                    Text("Teléfono: ${point.phone}", fontSize = 14.sp, color = Color.DarkGray)
+                                }
 
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
@@ -157,5 +293,26 @@ fun MapScreen(viewModel: MapViewModel, onBackClick: () -> Unit) {
                 }
             }
         }
+    }
+}
+
+@Suppress("MissingPermission")
+private fun getCurrentLocation(context: android.content.Context, viewModel: MapViewModel) {
+    val fusedLocationClient = LocationServices.getFusedLocationProviderClient(context)
+    val cancellationTokenSource = CancellationTokenSource()
+
+    fusedLocationClient.getCurrentLocation(
+        Priority.PRIORITY_HIGH_ACCURACY,
+        cancellationTokenSource.token
+    ).addOnSuccessListener { location ->
+        if (location != null) {
+            val userLatLng = LatLng(location.latitude, location.longitude)
+            viewModel.updateUserLocation(userLatLng)
+            Log.d("MapScreen", "Location obtained: ${location.latitude}, ${location.longitude}")
+        } else {
+            Log.e("MapScreen", "Location is null")
+        }
+    }.addOnFailureListener { exception ->
+        Log.e("MapScreen", "Error getting location: ${exception.message}")
     }
 }

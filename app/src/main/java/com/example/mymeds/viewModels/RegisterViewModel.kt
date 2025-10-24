@@ -160,13 +160,13 @@ class RegisterViewModel : ViewModel() {
                     "createdAt" to Date()
                 )
 
-                firestore.collection("users").document(userId).set(userMap)
+                firestore.collection("usuarios").document(userId).set(userMap)
                     .addOnSuccessListener {
-                        firestore.collection("usuarios").document(userId).set(userMap)
-                            .addOnSuccessListener { onResult(true, "User registered successfully.") }
-                            .addOnFailureListener { ex -> onResult(false, "Saved in 'users' but failed in 'usuarios': ${ex.message}") }
+                         onResult(true, "User registered successfully.")
                     }
-                    .addOnFailureListener { ex -> onResult(false, "Failed saving in 'users': ${ex.message}") }
+                    .addOnFailureListener { ex ->
+                        onResult(false, "Failed to save user: ${ex.message}")
+                    }
             }
         }
     }

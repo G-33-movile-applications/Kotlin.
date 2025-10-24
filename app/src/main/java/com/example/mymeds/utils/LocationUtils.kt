@@ -1,9 +1,11 @@
 package com.example.mymeds.utils
+
 import com.example.mymeds.models.PhysicalPoint
 import com.google.android.gms.maps.model.LatLng
 import kotlin.math.*
 
 object LocationUtils {
+
 
     fun calculateDistance(
         lat1: Double,
@@ -26,10 +28,27 @@ object LocationUtils {
     }
 
 
+    fun filterPharmaciesWithinRadius(
+        userLocation: LatLng,
+        pharmacies: List<PhysicalPoint>,
+        radiusInMeters: Double = 6000.0
+    ): List<PhysicalPoint> {
+        return pharmacies.filter { pharmacy ->
+            val distance = calculateDistance(
+                userLocation.latitude,
+                userLocation.longitude,
+                pharmacy.location.latitude,
+                pharmacy.location.longitude
+            )
+            distance <= radiusInMeters
+        }
+    }
+
+
     fun findNearestPharmacies(
         userLocation: LatLng,
         pharmacies: List<PhysicalPoint>,
-        count: Int = 3
+        count: Int = 5
     ): List<Pair<PhysicalPoint, Double>> {
         return pharmacies
             .map { pharmacy ->
@@ -46,6 +65,24 @@ object LocationUtils {
     }
 
 
+    fun getRelevantPharmacies(
+        userLocation: LatLng,
+        allPharmacies: List<PhysicalPoint>,
+        radiusInMeters: Double = 6000.0
+    ): RelevantPharmacies {
+        // Filtrar farmacias dentro del radio
+        val pharmaciesInRadius = filterPharmaciesWithinRadius(userLocation, allPharmacies, radiusInMeters)
+
+        // Obtener las 3 más cercanas (de todas, no solo las del radio)
+        val nearest = findNearestPharmacies(userLocation, allPharmacies, 5)
+
+        return RelevantPharmacies(
+            nearestThree = nearest,
+            withinRadius = pharmaciesInRadius
+        )
+    }
+
+
     fun formatDistance(distanceInMeters: Double): String {
         return when {
             distanceInMeters < 1000 -> "${distanceInMeters.toInt()} m"
@@ -53,3 +90,9 @@ object LocationUtils {
         }
     }
 }
+
+
+data class RelevantPharmacies(
+    val nearestThree: List<Pair<PhysicalPoint, Double>>,
+    val withinRadius: List<PhysicalPoint>
+)

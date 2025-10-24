@@ -15,8 +15,12 @@ class MapViewModel : ViewModel() {
 
     private val repository = PhysicalPointsRepository()
 
-    private val _physicalPoints = MutableLiveData<List<PhysicalPoint>>()
-    val physicalPoints: LiveData<List<PhysicalPoint>> = _physicalPoints
+    // Lista completa de farmacias (privada, solo para cálculos)
+    private var allPharmacies: List<PhysicalPoint> = emptyList()
+
+    // Farmacias a mostrar en el mapa (las relevantes)
+    private val _visiblePharmacies = MutableLiveData<List<PhysicalPoint>>()
+    val visiblePharmacies: LiveData<List<PhysicalPoint>> = _visiblePharmacies
 
     private val _nearestPharmacies = MutableLiveData<List<Pair<PhysicalPoint, Double>>>()
     val nearestPharmacies: LiveData<List<Pair<PhysicalPoint, Double>>> = _nearestPharmacies
@@ -41,12 +45,15 @@ class MapViewModel : ViewModel() {
                 val result = repository.getAllPhysicalPoints()
 
                 result.onSuccess { pointsList ->
-                    Log.d("MapViewModel", "✓ Success! Loaded ${pointsList.size} points")
-                    _physicalPoints.value = pointsList
+                    Log.d("MapViewModel", "✓ Success! Loaded ${pointsList.size} total points")
+                    allPharmacies = pointsList
 
-                    // Si ya tenemos la ubicación del usuario, calcular las más cercanas
+                    // Si ya tenemos la ubicación del usuario, calcular las relevantes
                     _userLocation.value?.let { location ->
-                        updateNearestPharmacies(location, pointsList)
+                        updateRelevantPharmacies(location)
+                    } ?: run {
+                        // Sin ubicación, mostrar todas
+                        _visiblePharmacies.value = pointsList
                     }
 
                     _loadingState.value = LoadingState.SUCCESS
@@ -65,18 +72,29 @@ class MapViewModel : ViewModel() {
         Log.d("MapViewModel", "User location updated: ${location.latitude}, ${location.longitude}")
         _userLocation.value = location
 
-        // Calcular las farmacias más cercanas
-        _physicalPoints.value?.let { pharmacies ->
-            updateNearestPharmacies(location, pharmacies)
-        }
+        // Actualizar las farmacias relevantes
+        updateRelevantPharmacies(location)
     }
 
-    private fun updateNearestPharmacies(userLocation: LatLng, pharmacies: List<PhysicalPoint>) {
-        val nearest = LocationUtils.findNearestPharmacies(userLocation, pharmacies, 3)
-        _nearestPharmacies.value = nearest
+    private fun updateRelevantPharmacies(userLocation: LatLng) {
+        val relevant = LocationUtils.getRelevantPharmacies(userLocation, allPharmacies, 6000.0)
 
-        Log.d("MapViewModel", "=== Top 3 Nearest Pharmacies ===")
-        nearest.forEachIndexed { index, (pharmacy, distance) ->
+        // Actualizar las 3 más cercanas
+        _nearestPharmacies.value = relevant.nearestThree
+
+        // Combinar las 3 más cercanas con las del radio (sin duplicados)
+        val nearestPharmaciesSet = relevant.nearestThree.map { it.first }.toSet()
+        val allRelevant = (nearestPharmaciesSet + relevant.withinRadius).toList()
+
+        _visiblePharmacies.value = allRelevant
+
+        Log.d("MapViewModel", "=== Location Update ===")
+        Log.d("MapViewModel", "Total pharmacies in database: ${allPharmacies.size}")
+        Log.d("MapViewModel", "Pharmacies within 6km: ${relevant.withinRadius.size}")
+        Log.d("MapViewModel", "Total visible pharmacies: ${allRelevant.size}")
+        Log.d("MapViewModel", "")
+        Log.d("MapViewModel", "=== Top 5 Nearest Pharmacies ===")
+        relevant.nearestThree.forEachIndexed { index, (pharmacy, distance) ->
             Log.d("MapViewModel", "${index + 1}. ${pharmacy.name}")
             Log.d("MapViewModel", "   Distance: ${LocationUtils.formatDistance(distance)}")
             Log.d("MapViewModel", "   Address: ${pharmacy.address}")

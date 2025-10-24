@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.livedata.observeAsState
@@ -32,10 +31,13 @@ import com.example.mymeds.ui.theme.MyMedsTheme
 import com.example.mymeds.utils.LocationUtils
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
+import com.google.android.gms.maps.CameraUpdateFactory
 import com.google.android.gms.maps.model.CameraPosition
 import com.google.android.gms.maps.model.LatLng
+import com.google.android.gms.maps.model.LatLngBounds
 import com.google.android.gms.tasks.CancellationTokenSource
 import com.google.maps.android.compose.*
+import kotlinx.coroutines.launch
 
 class MapActivity : ComponentActivity() {
 
@@ -59,7 +61,7 @@ class MapActivity : ComponentActivity() {
 @Composable
 fun MapScreen(viewModel: MapViewModel, onBackClick: () -> Unit) {
     val context = LocalContext.current
-    val points by viewModel.physicalPoints.observeAsState(initial = emptyList())
+    val visiblePharmacies by viewModel.visiblePharmacies.observeAsState(initial = emptyList())
     val nearestPharmacies by viewModel.nearestPharmacies.observeAsState(initial = emptyList())
     val userLocation by viewModel.userLocation.observeAsState()
     val loadingState by viewModel.loadingState.observeAsState(initial = LoadingState.LOADING)
@@ -67,15 +69,42 @@ fun MapScreen(viewModel: MapViewModel, onBackClick: () -> Unit) {
     var selectedPoint by remember { mutableStateOf<PhysicalPoint?>(null) }
     var hasLocationPermission by remember { mutableStateOf(false) }
 
-    val defaultLocation = LatLng(4.601485, -74.066445) // Uniandes como fallback
+    val defaultLocation = LatLng(4.710989, -74.072092) // Centro de Bogotá
     val cameraPositionState = rememberCameraPositionState {
-        position = CameraPosition.fromLatLngZoom(userLocation ?: defaultLocation, 15f)
+        position = CameraPosition.fromLatLngZoom(defaultLocation, 11f)
     }
 
-    // Actualizar cámara cuando cambie la ubicación del usuario
-    LaunchedEffect(userLocation) {
-        userLocation?.let { location ->
-            cameraPositionState.position = CameraPosition.fromLatLngZoom(location, 15f)
+    val coroutineScope = rememberCoroutineScope()
+
+    // Actualizar cámara según el caso
+    LaunchedEffect(userLocation, nearestPharmacies, loadingState, hasLocationPermission, visiblePharmacies) {
+        when {
+            // Caso 1: Usuario con permisos y farmacias cercanas calculadas
+            userLocation != null && nearestPharmacies.isNotEmpty() -> {
+                coroutineScope.launch {
+                    val bounds = calculateBounds(userLocation!!, nearestPharmacies)
+                    cameraPositionState.animate(
+                        CameraUpdateFactory.newLatLngBounds(bounds, 150)
+                    )
+                }
+            }
+            // Caso 2: Usuario con permisos pero aún no hay farmacias cercanas
+            userLocation != null -> {
+                coroutineScope.launch {
+                    cameraPositionState.animate(
+                        CameraUpdateFactory.newLatLngZoom(userLocation!!, 15f)
+                    )
+                }
+            }
+            // Caso 3: Sin permisos, mostrar todas las farmacias
+            loadingState == LoadingState.SUCCESS && !hasLocationPermission && visiblePharmacies.isNotEmpty() -> {
+                coroutineScope.launch {
+                    val bounds = calculateBoundsForAllPharmacies(visiblePharmacies)
+                    cameraPositionState.animate(
+                        CameraUpdateFactory.newLatLngBounds(bounds, 100)
+                    )
+                }
+            }
         }
     }
 
@@ -137,28 +166,6 @@ fun MapScreen(viewModel: MapViewModel, onBackClick: () -> Unit) {
                         Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = Color.White)
                     }
                 },
-                actions = {
-                    IconButton(
-                        onClick = {
-                            if (hasLocationPermission) {
-                                getCurrentLocation(context, viewModel)
-                            } else {
-                                locationPermissionLauncher.launch(
-                                    arrayOf(
-                                        Manifest.permission.ACCESS_FINE_LOCATION,
-                                        Manifest.permission.ACCESS_COARSE_LOCATION
-                                    )
-                                )
-                            }
-                        }
-                    ) {
-                        Icon(
-                            Icons.Default.MyLocation,
-                            contentDescription = "My Location",
-                            tint = Color.White
-                        )
-                    }
-                },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFF6B9BD8))
             )
         }
@@ -185,23 +192,21 @@ fun MapScreen(viewModel: MapViewModel, onBackClick: () -> Unit) {
                     GoogleMap(
                         modifier = Modifier.fillMaxSize(),
                         cameraPositionState = cameraPositionState,
-                        properties = MapProperties(isMyLocationEnabled = hasLocationPermission)
-                    ) {
-                        // Marcador del usuario
-                        userLocation?.let { location ->
-                            Marker(
-                                state = MarkerState(position = location),
-                                title = "Tu ubicación",
-                                icon = com.google.android.gms.maps.model.BitmapDescriptorFactory
-                                    .defaultMarker(com.google.android.gms.maps.model.BitmapDescriptorFactory.HUE_AZURE)
-                            )
+                        properties = MapProperties(isMyLocationEnabled = hasLocationPermission),
+                        uiSettings = MapUiSettings(
+                            myLocationButtonEnabled = true,
+                            zoomControlsEnabled = true
+                        ),
+                        onMapClick = {
+                            // Cerrar el panel de información al tocar el mapa
+                            selectedPoint = null
                         }
-
-                        // Marcadores de farmacias
-                        points.forEach { point ->
+                    ) {
+                        // Marcadores de farmacias (solo las visibles)
+                        visiblePharmacies.forEach { point ->
                             val isNearby = nearestPharmacies.any { it.first == point }
                             val color = if (isNearby) {
-                                com.google.android.gms.maps.model.BitmapDescriptorFactory.HUE_GREEN
+                                com.google.android.gms.maps.model.BitmapDescriptorFactory.HUE_ORANGE
                             } else {
                                 com.google.android.gms.maps.model.BitmapDescriptorFactory.HUE_RED
                             }
@@ -294,6 +299,39 @@ fun MapScreen(viewModel: MapViewModel, onBackClick: () -> Unit) {
             }
         }
     }
+}
+
+/**
+ * Calcula los límites que incluyen la ubicación del usuario y las 3 farmacias más cercanas
+ */
+private fun calculateBounds(
+    userLocation: LatLng,
+    nearestPharmacies: List<Pair<PhysicalPoint, Double>>
+): LatLngBounds {
+    val builder = LatLngBounds.Builder()
+
+    // Agregar ubicación del usuario
+    builder.include(userLocation)
+
+    // Agregar las 3 farmacias más cercanas
+    nearestPharmacies.forEach { (pharmacy, _) ->
+        builder.include(LatLng(pharmacy.location.latitude, pharmacy.location.longitude))
+    }
+
+    return builder.build()
+}
+
+/**
+ * Calcula los límites para mostrar todas las farmacias visibles
+ */
+private fun calculateBoundsForAllPharmacies(pharmacies: List<PhysicalPoint>): LatLngBounds {
+    val builder = LatLngBounds.Builder()
+
+    pharmacies.forEach { pharmacy ->
+        builder.include(LatLng(pharmacy.location.latitude, pharmacy.location.longitude))
+    }
+
+    return builder.build()
 }
 
 @Suppress("MissingPermission")

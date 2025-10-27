@@ -1,6 +1,7 @@
 package com.example.mymeds.views
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.util.Log
@@ -12,7 +13,7 @@ import androidx.activity.viewModels
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.livedata.observeAsState
@@ -50,7 +51,13 @@ class MapActivity : ComponentActivity() {
             MyMedsTheme {
                 MapScreen(
                     viewModel = mapViewModel,
-                    onBackClick = { finish() }
+                    onBackClick = { finish() },
+                    onViewInventory = { pharmacyName ->
+                        val intent = Intent(this, PharmacyInventoryActivity::class.java).apply {
+                            putExtra("PHARMACY_NAME", pharmacyName)
+                        }
+                        startActivity(intent)
+                    }
                 )
             }
         }
@@ -59,7 +66,11 @@ class MapActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MapScreen(viewModel: MapViewModel, onBackClick: () -> Unit) {
+fun MapScreen(
+    viewModel: MapViewModel,
+    onBackClick: () -> Unit,
+    onViewInventory: (String) -> Unit
+) {
     val context = LocalContext.current
     val visiblePharmacies by viewModel.visiblePharmacies.observeAsState(initial = emptyList())
     val nearestPharmacies by viewModel.nearestPharmacies.observeAsState(initial = emptyList())
@@ -163,7 +174,7 @@ fun MapScreen(viewModel: MapViewModel, onBackClick: () -> Unit) {
                 },
                 navigationIcon = {
                     IconButton(onClick = onBackClick) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = Color.White)
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFF6B9BD8))
@@ -281,15 +292,15 @@ fun MapScreen(viewModel: MapViewModel, onBackClick: () -> Unit) {
                                 ) {
                                     Button(
                                         onClick = { /* TODO: Delivery logic */ },
-                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD6CBAF))
+                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6B9BD8))
                                     ) {
-                                        Text("Hacer Pedido", color = Color.Black)
+                                        Text("Hacer Pedido", color = Color.White)
                                     }
                                     Button(
-                                        onClick = { /* TODO: Inventory logic */ },
-                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD6CBAF))
+                                        onClick = { onViewInventory(point.name) },
+                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6B9BD8))
                                     ) {
-                                        Text("Ver inventario", color = Color.Black)
+                                        Text("Ver inventario", color = Color.White)
                                     }
                                 }
                             }

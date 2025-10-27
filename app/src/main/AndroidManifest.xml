@@ -50,6 +50,11 @@
             android:name=".views.RegisterActivity"
             android:exported="true"
             android:theme="@style/Theme.MyMeds" />
+        <!-- PharmacyInventory -->
+        <activity
+            android:name=".views.PharmacyInventoryActivity"
+            android:exported="false"
+            android:theme="@style/Theme.MyMeds" />
 
         <!-- HomeActivity -->
         <activity

@@ -15,6 +15,7 @@ import androidx.compose.material.icons.filled.ExitToApp
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Place
+import androidx.compose.material.icons.filled.ShoppingCart // 👈 nuevo ícono
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -28,6 +29,7 @@ import com.example.mymeds.ui.theme.MyMedsTheme
 import androidx.compose.ui.tooling.preview.Preview
 import com.google.firebase.auth.FirebaseAuth
 
+
 class HomeActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -40,7 +42,8 @@ class HomeActivity : ComponentActivity() {
                     onUploadPrescriptionClick = { navigateToUploadPrescription() },
                     onProfileClick = { navigateToProfile() },
                     onNotificationsClick = { showNotifications() },
-                    onLogoutClick = { logout() }
+                    onLogoutClick = { logout() },
+                    onOrdersClick = { navigateToOrders() } // 👈 nuevo callback
                 )
             }
         }
@@ -61,14 +64,19 @@ class HomeActivity : ComponentActivity() {
         startActivity(intent)
     }
 
+    private fun navigateToOrders() {
+        // TODO: asegúrate de tener OrdersActivity creada en este mismo paquete (o ajusta el paquete)
+        val intent = Intent(this, OrdersManagementActivity::class.java)
+        startActivity(intent)
+    }
+
     private fun showNotifications() {
         // Implementar lógica de notificaciones
     }
 
     private fun logout() {
         FirebaseAuth.getInstance().signOut()
-        // Cambia LoginActivity por el nombre real de tu pantalla de login si difiere
-        startActivity(Intent(this, LoginActivity::class.java))
+        startActivity(Intent(this, LoginActivity::class.java)) // Ajusta si tu login se llama distinto
         finish()
     }
 }
@@ -80,7 +88,8 @@ fun HomeScreen(
     onUploadPrescriptionClick: () -> Unit = {},
     onProfileClick: () -> Unit = {},
     onNotificationsClick: () -> Unit = {},
-    onLogoutClick: () -> Unit = {}
+    onLogoutClick: () -> Unit = {},
+    onOrdersClick: () -> Unit = {} // 👈 nuevo parámetro
 ) {
     Scaffold(
         topBar = {
@@ -104,7 +113,7 @@ fun HomeScreen(
                     }
                     IconButton(onClick = onLogoutClick) {
                         Icon(
-                            imageVector = Icons.Filled.ExitToApp, // usa Icons.Default.Logout si lo tienes
+                            imageVector = Icons.Filled.ExitToApp,
                             contentDescription = "Cerrar sesión",
                             tint = Color.White
                         )
@@ -124,7 +133,7 @@ fun HomeScreen(
                 .verticalScroll(rememberScrollState())
                 .padding(top = 16.dp)
         ) {
-            // Tarjetas de funcionalidad
+            // Ver mapa de farmacias
             FunctionalityCard(
                 title = "Ver mapa de farmacias",
                 description = "Encuentra sucursales EPS cercanas, horarios y stock estimado.",
@@ -135,6 +144,7 @@ fun HomeScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
+            // Subir prescripción
             FunctionalityCard(
                 title = "Sube tu prescripción",
                 description = "Escanea o carga la fórmula para validar y agilizar tu pedido.",
@@ -145,6 +155,18 @@ fun HomeScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
+            // 👇 Nuevo bloque: Gestionar pedidos
+            FunctionalityCard(
+                title = "Gestionar pedidos",
+                description = "Crea pedidos, revisa estados y descarga recibos.",
+                icon = Icons.Filled.ShoppingCart,
+                buttonText = "Ver pedidos",
+                onClick = onOrdersClick
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Perfil
             FunctionalityCard(
                 title = "Ver tu perfil",
                 description = "Datos del usuario, preferencias y accesibilidad.",

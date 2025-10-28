@@ -102,6 +102,7 @@ fun HomeScreen(
                         color = Color.White
                     )
                 },
+
                 actions = {
                     IconButton(onClick = onNotificationsClick) {
                         Icon(

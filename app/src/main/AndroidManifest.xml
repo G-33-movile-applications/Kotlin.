@@ -105,5 +105,9 @@
             android:exported="true"
             android:theme="@style/Theme.MyMeds"/>
 
+        <receiver
+            android:name=".session.RememberSessionReceiver"
+            android:exported="false" />
+
     </application>
 </manifest>

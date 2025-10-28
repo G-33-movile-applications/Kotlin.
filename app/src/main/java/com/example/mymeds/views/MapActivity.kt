@@ -13,7 +13,7 @@ import androidx.activity.viewModels
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.livedata.observeAsState
@@ -57,6 +57,12 @@ class MapActivity : ComponentActivity() {
                             putExtra("PHARMACY_NAME", pharmacyName)
                         }
                         startActivity(intent)
+                    },
+                    onMakeOrder = { pharmacyName ->
+                        val intent = Intent(this, DeliveryActivity::class.java).apply {
+                            putExtra("PHARMACY_NAME", pharmacyName)
+                        }
+                        startActivity(intent)
                     }
                 )
             }
@@ -69,7 +75,8 @@ class MapActivity : ComponentActivity() {
 fun MapScreen(
     viewModel: MapViewModel,
     onBackClick: () -> Unit,
-    onViewInventory: (String) -> Unit
+    onViewInventory: (String) -> Unit,
+    onMakeOrder: (String) -> Unit
 ) {
     val context = LocalContext.current
     val visiblePharmacies by viewModel.visiblePharmacies.observeAsState(initial = emptyList())
@@ -174,7 +181,7 @@ fun MapScreen(
                 },
                 navigationIcon = {
                     IconButton(onClick = onBackClick) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
+                        Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = Color.White)
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = Color(0xFF6B9BD8))
@@ -291,7 +298,7 @@ fun MapScreen(
                                     horizontalArrangement = Arrangement.SpaceEvenly
                                 ) {
                                     Button(
-                                        onClick = { /* TODO: Delivery logic */ },
+                                        onClick = { onMakeOrder(point.name) },
                                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6B9BD8))
                                     ) {
                                         Text("Hacer Pedido", color = Color.White)

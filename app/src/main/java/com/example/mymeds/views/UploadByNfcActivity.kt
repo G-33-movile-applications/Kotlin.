@@ -1,9 +1,14 @@
 package com.example.mymeds.views
 
+import android.app.PendingIntent
+import android.content.Intent
+import android.content.IntentFilter
 import android.nfc.NfcAdapter
 import android.nfc.Tag
+import android.nfc.tech.Ndef
 import android.os.Bundle
 import android.widget.Toast
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
@@ -20,18 +25,11 @@ import com.example.mymeds.viewModels.NfcViewModel
 import com.example.mymeds.views.components.PrescriptionComponents.HeaderStatusCard
 import com.example.mymeds.views.components.PrescriptionComponents.LargeActionCard
 import com.example.mymeds.views.components.PrescriptionComponents.HelpBox
-import java.util.concurrent.atomic.AtomicReference
 
 class UploadByNfcActivity : ComponentActivity() {
 
     private val vm: NfcViewModel by viewModels()
     private var nfcAdapter: NfcAdapter? = null
-    private val pendingTag = AtomicReference<Tag?>(null)
-
-    private val readerCallback = NfcAdapter.ReaderCallback { tag ->
-        vm.onTagDiscovered(tag)
-        pendingTag.set(tag) // Guarda el tag para operaciones posteriores
-    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -41,49 +39,83 @@ class UploadByNfcActivity : ComponentActivity() {
         setContent {
             UploadByNfcScreen(
                 vm = vm,
-                onRead = { enableReading(true) },
-                onStopRead = { enableReading(false) },
-                onWrite = { json: String ->
-                    val tag = pendingTag.get()
-                    if (tag == null) {
-                        Toast.makeText(this, "Acerque un tag para escribir", Toast.LENGTH_SHORT).show()
-                    } else {
-                        vm.writeToTag(tag, json) { _, msg ->
-                            runOnUiThread { Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() }
-                        }
-                    }
-                },
-                onWipe = {
-                    val tag = pendingTag.get()
-                    if (tag == null) {
-                        Toast.makeText(this, "Acerque un tag para limpiar", Toast.LENGTH_SHORT).show()
-                    } else {
-                        vm.wipeTag(tag) { _, msg ->
-                            runOnUiThread { Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() }
-                        }
-                    }
-                },
+                onRead = { vm.startReading() },
+                onStopRead = { vm.stopReading() },
+                onWrite = { json: String -> vm.prepareToWrite(json) },
+                onWipe = { vm.prepareToWipe() },
                 onBack = { finish() }
             )
         }
     }
 
-    private fun enableReading(enable: Boolean) {
-        if (enable) {
-            nfcAdapter?.enableReaderMode(
-                this,
-                readerCallback,
-                NfcAdapter.FLAG_READER_NFC_A or
-                        NfcAdapter.FLAG_READER_NFC_B or
-                        NfcAdapter.FLAG_READER_NFC_F or
-                        NfcAdapter.FLAG_READER_NFC_V or
-                        NfcAdapter.FLAG_READER_NFC_BARCODE,
-                Bundle().apply { putInt(NfcAdapter.EXTRA_READER_PRESENCE_CHECK_DELAY, 50) }
-            )
-            vm.startReading()
-        } else {
-            nfcAdapter?.disableReaderMode(this)
-            vm.stopReading()
+    override fun onResume() {
+        super.onResume()
+        enableForegroundDispatch()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        disableForegroundDispatch()
+    }
+
+    /**
+     * Función del sistema de Android para usar NFC mientras la app anda corriendo
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+
+        if (NfcAdapter.ACTION_NDEF_DISCOVERED == intent.action ||
+            NfcAdapter.ACTION_TECH_DISCOVERED == intent.action ||
+            NfcAdapter.ACTION_TAG_DISCOVERED == intent.action) {
+
+            Log.d("UploadByNfcActivity", "Foreground Dispatch discovered a tag.")
+
+            val tag = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                intent.getParcelableExtra(NfcAdapter.EXTRA_TAG, Tag::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                intent.getParcelableExtra(NfcAdapter.EXTRA_TAG)
+            }
+
+            // Tag nuevo
+            tag?.let {
+                vm.onTagDiscovered(it)
+            }
+        }
+    }
+
+    /**
+     * Prioridad a la actividad para leer los NFC
+     */
+    private fun enableForegroundDispatch() {
+        if (nfcAdapter == null) {
+            Log.e("UploadByNfcActivity", "NFC Adapter not available.")
+            return
+        }
+        try {
+            val intent = Intent(this, javaClass).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            val pendingIntent = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_MUTABLE)
+
+            // Para aceptar todos los NDEF
+            val ndefFilter = arrayOf(IntentFilter(NfcAdapter.ACTION_NDEF_DISCOVERED).apply { addDataType("*/*") })
+
+            // En dado caso de querer especificar los tech nfc
+            val techLists = arrayOf(arrayOf(Ndef::class.java.name))
+
+            // Foreground dispatch activo
+            nfcAdapter?.enableForegroundDispatch(this, pendingIntent, ndefFilter, techLists)
+            Log.d("UploadByNfcActivity", "Foreground Dispatch Enabled")
+        } catch (e: Exception) {
+            Log.e("UploadByNfcActivity", "Error enabling foreground dispatch", e)
+        }
+    }
+
+    private fun disableForegroundDispatch() {
+        try {
+            nfcAdapter?.disableForegroundDispatch(this)
+            Log.d("UploadByNfcActivity", "Foreground Dispatch Disabled")
+        } catch (e: Exception) {
+            Log.e("UploadByNfcActivity", "Error disabling foreground dispatch", e)
         }
     }
 }
@@ -115,7 +147,6 @@ fun UploadByNfcScreen(
             modifier = Modifier
                 .padding(pad)
                 .padding(16.dp)
-                .fillMaxSize()
                 .verticalScroll(scroll),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
@@ -159,6 +190,8 @@ fun UploadByNfcScreen(
                 }
             }
 
+            Spacer(Modifier.weight(1f))
+
             HelpBox(
                 title = "Cómo usar NFC",
                 bullets = listOf(
@@ -182,4 +215,3 @@ private fun buildPrescriptionJsonFromState(): String = """
   "signed": false
 }
 """.trimIndent()
-

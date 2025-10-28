@@ -14,10 +14,14 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
+private enum class PendingAction { NONE, WRITE, WIPE }
 private val Ndef.isWriteProtected: Boolean
     get() = this.canMakeReadOnly() && !this.isWritable
 
 class NfcViewModel : ViewModel() {
+
+    private var pendingAction = PendingAction.NONE
+    private var dataToWrite: String? = null
 
     data class UiState(
         val supported: Boolean = false,
@@ -41,21 +45,57 @@ class NfcViewModel : ViewModel() {
     fun stopReading() { _ui.update { it.copy(reading = false, status = "Lectura detenida") } }
 
     fun onTagDiscovered(tag: Tag) {
+        when (pendingAction) {
+            PendingAction.WRITE -> {
+                val json = dataToWrite ?: "{}"
+                pendingAction = PendingAction.NONE
+                dataToWrite = null
+                writeToTag(tag, json) { success, msg ->
+                    _ui.update { it.copy(status = msg) }
+                }
+            }
+            PendingAction.WIPE -> {
+                pendingAction = PendingAction.NONE
+                wipeTag(tag) { success, msg ->
+                    _ui.update { it.copy(status = msg) }
+                }
+            }
+            PendingAction.NONE -> {
+                if (_ui.value.reading) {
+                    readFromTag(tag)
+                }
+            }
+        }
+    }
+
+    fun prepareToWrite(json: String) {
+        dataToWrite = json
+        pendingAction = PendingAction.WRITE
+        _ui.update { it.copy(status = "Acerque el tag para ESCRIBIR") }
+    }
+
+    fun prepareToWipe() {
+        pendingAction = PendingAction.WIPE
+        _ui.update { it.copy(status = "Acerque el tag para LIMPIAR") }
+    }
+
+    private fun readFromTag(tag: Tag) {
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {
                 val ndef = Ndef.get(tag) ?: error("El tag no es compatible con NDEF")
                 ndef.connect()
-                // 4. Corrige el bloque runCatching para que devuelva un String o null
                 val msg = ndef.ndefMessage
                 val rec = msg.records.firstOrNull { it.tnf == NdefRecord.TNF_MIME_MEDIA }
                 val data = rec?.payload?.toString(Charsets.UTF_8)
                 ndef.close()
-                data // Esta es la última expresión, se convierte en el resultado
+                data
             }.onSuccess { json ->
-                _ui.update { it.copy(status = if (json!=null) "Prescripción leída" else "Tag vacío",
+                _ui.update { it.copy(status = if (json != null) "Prescripción leída" else "Tag vacío",
                     lastPayload = json) }
-            }.onFailure { exception -> // Es buena práctica nombrar la excepción
+                stopReading() // Exito de lectura
+            }.onFailure { exception ->
                 _ui.update { it.copy(status = "Error leyendo tag: ${exception.message}") }
+                stopReading() // Error de lectura
             }
         }
     }

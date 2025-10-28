@@ -108,6 +108,8 @@
         <!-- Servicio detección conducción -->
         <service android:name=".services.DrivingDetector"
             android:enabled="true"
+        <receiver
+            android:name=".session.RememberSessionReceiver"
             android:exported="false" />
 
     </application>

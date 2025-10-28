@@ -1,6 +1,5 @@
 package com.example.mymeds.views
 
-import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.widget.Toast
@@ -15,7 +14,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -23,30 +21,69 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
-import com.example.mymeds.MainActivity
+import androidx.lifecycle.lifecycleScope
 import com.example.mymeds.R
+import com.example.mymeds.session.RememberSessionPrefs
 import com.example.mymeds.ui.theme.MyMedsTheme
 import com.example.mymeds.viewModels.LoginViewModel
+import kotlinx.coroutines.launch
 
 class LoginActivity : ComponentActivity() {
     private val loginViewModel: LoginViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent {
-            MyMedsTheme {
-                LoginScreen(loginViewModel)
+
+        lifecycleScope.launch {
+            val hasFirebaseUser = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser != null
+            val rememberedOk = RememberSessionPrefs.shouldAutoLogin(this@LoginActivity)
+
+            if (hasFirebaseUser && rememberedOk) {
+                // 🔁 sesión válida → ir a Home y terminar LoginActivity
+                startActivity(Intent(this@LoginActivity, HomeActivity::class.java))
+                finish()
+                return@launch    // 👈 evita ejecutar setContent
+            }
+
+            // ⬇️ solo pintamos la UI si NO hay autologin
+            setContent {
+                MyMedsTheme {
+                    LoginScreen(
+                        viewModel = loginViewModel,
+                        onLoginSuccess = { keepSignedIn ->
+                            lifecycleScope.launch {
+                                if (keepSignedIn) {
+                                    RememberSessionPrefs.setKeepSignedIn(this@LoginActivity, true)
+                                    RememberSessionPrefs.setLastLoginNow(this@LoginActivity)
+                                } else {
+                                    RememberSessionPrefs.setKeepSignedIn(this@LoginActivity, false)
+                                    RememberSessionPrefs.clearTimestamp(this@LoginActivity)
+                                }
+                            }
+                            startActivity(Intent(this@LoginActivity, HomeActivity::class.java))
+                            finish()
+                        },
+                        onShowMessage = { msg ->
+                            Toast.makeText(this@LoginActivity, msg, Toast.LENGTH_LONG).show()
+                        }
+                    )
+                }
             }
         }
     }
 }
 
+
 @Composable
-fun LoginScreen(viewModel: LoginViewModel) {
+fun LoginScreen(
+    viewModel: LoginViewModel,
+    onLoginSuccess: (keepSignedInChecked: Boolean) -> Unit,
+    onShowMessage: (String) -> Unit
+) {
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
+    var keepSignedIn by remember { mutableStateOf(true) } // ✅ por defecto marcado
     val context = LocalContext.current
-
     val primaryButtonColor = Color(0xFF1A2247)
 
     Column(
@@ -56,7 +93,6 @@ fun LoginScreen(viewModel: LoginViewModel) {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Top
     ) {
-        // --- App Icon ---
         Image(
             painter = painterResource(id = R.mipmap.ic_launcher_foreground),
             contentDescription = "App Logo",
@@ -65,7 +101,6 @@ fun LoginScreen(viewModel: LoginViewModel) {
                 .padding(bottom = 32.dp)
         )
 
-        // --- Email ---
         OutlinedTextField(
             value = email,
             onValueChange = { email = it },
@@ -76,7 +111,6 @@ fun LoginScreen(viewModel: LoginViewModel) {
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // --- Password ---
         OutlinedTextField(
             value = password,
             onValueChange = { password = it },
@@ -87,7 +121,19 @@ fun LoginScreen(viewModel: LoginViewModel) {
             modifier = Modifier.fillMaxWidth()
         )
 
-        // --- Forgot Password ---
+        // ✅ Casilla “Mantener sesión por 7 días”
+        Spacer(modifier = Modifier.height(8.dp))
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Checkbox(
+                checked = keepSignedIn,
+                onCheckedChange = { keepSignedIn = it }
+            )
+            Text("Mantener sesión iniciada por 7 días")
+        }
+
         TextButton(
             onClick = {
                 context.startActivity(Intent(context, PasswordResetActivity::class.java))
@@ -99,14 +145,11 @@ fun LoginScreen(viewModel: LoginViewModel) {
 
         Spacer(modifier = Modifier.height(24.dp))
 
-        // --- Login Button ---
         Button(
             onClick = {
                 viewModel.login(email, password) { success, message ->
-                    Toast.makeText(context, message, Toast.LENGTH_LONG).show()
-                    if (success) {
-                        context.startActivity(Intent(context, HomeActivity::class.java))
-                    }
+                    onShowMessage(message ?: "Operación completada") // <- convierte String? a String
+                    if (success) onLoginSuccess(keepSignedIn)
                 }
             },
             colors = ButtonDefaults.buttonColors(containerColor = primaryButtonColor),
@@ -118,13 +161,11 @@ fun LoginScreen(viewModel: LoginViewModel) {
             Text("LOGIN", color = Color.White, fontWeight = FontWeight.Bold)
         }
 
+
         Spacer(modifier = Modifier.height(48.dp))
 
-        // --- Register Button ---
         Button(
-            onClick = {
-                context.startActivity(Intent(context, RegisterActivity::class.java))
-            },
+            onClick = { context.startActivity(Intent(context, RegisterActivity::class.java)) },
             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFE9E9E9)),
             modifier = Modifier
                 .fillMaxWidth()

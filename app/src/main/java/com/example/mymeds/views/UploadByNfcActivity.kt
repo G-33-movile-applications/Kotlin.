@@ -15,6 +15,8 @@ import androidx.activity.viewModels
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -25,6 +27,7 @@ import com.example.mymeds.viewModels.NfcViewModel
 import com.example.mymeds.views.components.PrescriptionComponents.HeaderStatusCard
 import com.example.mymeds.views.components.PrescriptionComponents.LargeActionCard
 import com.example.mymeds.views.components.PrescriptionComponents.HelpBox
+import com.google.firebase.auth.FirebaseAuth
 
 class UploadByNfcActivity : ComponentActivity() {
 
@@ -43,6 +46,19 @@ class UploadByNfcActivity : ComponentActivity() {
                 onStopRead = { vm.stopReading() },
                 onWrite = { json: String -> vm.prepareToWrite(json) },
                 onWipe = { vm.prepareToWipe() },
+                onSave = {
+                    val userId = FirebaseAuth.getInstance().currentUser?.uid
+                    if (userId.isNullOrBlank()) {
+                        Toast.makeText(this, "Error: Usuario no autenticado.", Toast.LENGTH_LONG).show()
+                        return@UploadByNfcScreen
+                    }
+                    vm.saveLastReadDataToFirebase(userId) { success, message ->
+                        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+                        if (success) {
+                            finish()
+                        }
+                    }
+                },
                 onBack = { finish() }
             )
         }
@@ -128,6 +144,7 @@ fun UploadByNfcScreen(
     onStopRead: () -> Unit,
     onWrite: (String) -> Unit,
     onWipe: () -> Unit,
+    onSave: () -> Unit,
     onBack: () -> Unit
 ) {
     val ui by vm.ui.collectAsState()
@@ -155,8 +172,29 @@ fun UploadByNfcScreen(
                 enabled = ui.enabled,
                 reading = ui.reading,
                 status = ui.status,
-                lastPayload = ui.lastPayload
+                lastReadData = ui.parsedData
             )
+
+            if (ui.parsedData != null && !ui.isSaving) {
+                Spacer(Modifier.height(16.dp))
+                Button(
+                    onClick = onSave,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(56.dp)
+                ) {
+                    Icon(Icons.Filled.Save, contentDescription = "Guardar")
+                    Spacer(Modifier.width(8.dp))
+                    Text("Guardar prescripción")
+                }
+            }
+
+            if (ui.isSaving) {
+                Spacer(Modifier.height(16.dp))
+                CircularProgressIndicator()
+                Spacer(Modifier.height(8.dp))
+                Text(ui.status, style = MaterialTheme.typography.bodyMedium)
+            }
 
             Text("Acciones NFC", style = MaterialTheme.typography.titleMedium)
 
@@ -206,12 +244,19 @@ fun UploadByNfcScreen(
 }
 
 /* ==== Ejemplo de JSON de prescripción ==== */
-private fun buildPrescriptionJsonFromState(): String = """
+private fun buildPrescriptionJsonFromState(): String {
+    val currentUserId = FirebaseAuth.getInstance().currentUser?.uid ?: "default_user_id_error"
+    Log.d("buildPrescriptionJson", "Using user ID for JSON: $currentUserId")
+    val sdf = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US)
+    val currentTime = sdf.format(java.util.Date())
+    return """
 {
   "rxId": "RX-${System.currentTimeMillis()}",
-  "patient": "P12345",
-  "meds": [{"drug":"Amoxicillin 500mg","dose":"1 cap","freq":"8h","days":7}],
-  "issuedAt": "${java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'").format(java.util.Date())}",
-  "signed": false
+  "patient": "RXYmdDzJCXNzQAYdj0XqqoZhICE3",
+  "meds": [{"drug":"Ibuprofeno 600mg","dose":"600","freq":"8h","days":7},
+  {"drug":"Diclofenaco 1000mg","dose":"1000","freq":"8h","days":7}],
+  "issuedAt": "$currentTime",
+  "signed": true
 }
 """.trimIndent()
+}

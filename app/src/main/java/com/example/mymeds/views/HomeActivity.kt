@@ -93,7 +93,7 @@ fun HomeScreen(
                         color = Color.White
                     )
                 },
-                // ❌ Sin navigationIcon (menú hamburguesa eliminado)
+
                 actions = {
                     IconButton(onClick = onNotificationsClick) {
                         Icon(

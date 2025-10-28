@@ -101,5 +101,9 @@
         <activity android:name=".views.UploadPrescriptionPDFActivity"
             android:exported="true"
             android:theme="@style/Theme.MyMeds"/>
+        <activity android:name=".views.OrdersManagementActivity"
+            android:exported="true"
+            android:theme="@style/Theme.MyMeds"/>
+
     </application>
 </manifest>

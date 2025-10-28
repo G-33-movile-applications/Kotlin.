@@ -1,6 +1,7 @@
 package com.example.mymeds.views
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.util.Log
@@ -50,7 +51,19 @@ class MapActivity : ComponentActivity() {
             MyMedsTheme {
                 MapScreen(
                     viewModel = mapViewModel,
-                    onBackClick = { finish() }
+                    onBackClick = { finish() },
+                    onViewInventory = { pharmacyName ->
+                        val intent = Intent(this, PharmacyInventoryActivity::class.java).apply {
+                            putExtra("PHARMACY_NAME", pharmacyName)
+                        }
+                        startActivity(intent)
+                    },
+                    onMakeOrder = { pharmacyName ->
+                        val intent = Intent(this, DeliveryActivity::class.java).apply {
+                            putExtra("PHARMACY_NAME", pharmacyName)
+                        }
+                        startActivity(intent)
+                    }
                 )
             }
         }
@@ -59,7 +72,12 @@ class MapActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MapScreen(viewModel: MapViewModel, onBackClick: () -> Unit) {
+fun MapScreen(
+    viewModel: MapViewModel,
+    onBackClick: () -> Unit,
+    onViewInventory: (String) -> Unit,
+    onMakeOrder: (String) -> Unit
+) {
     val context = LocalContext.current
     val visiblePharmacies by viewModel.visiblePharmacies.observeAsState(initial = emptyList())
     val nearestPharmacies by viewModel.nearestPharmacies.observeAsState(initial = emptyList())
@@ -280,16 +298,16 @@ fun MapScreen(viewModel: MapViewModel, onBackClick: () -> Unit) {
                                     horizontalArrangement = Arrangement.SpaceEvenly
                                 ) {
                                     Button(
-                                        onClick = { /* TODO: Delivery logic */ },
-                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD6CBAF))
+                                        onClick = { onMakeOrder(point.name) },
+                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6B9BD8))
                                     ) {
-                                        Text("Hacer Pedido", color = Color.Black)
+                                        Text("Hacer Pedido", color = Color.White)
                                     }
                                     Button(
-                                        onClick = { /* TODO: Inventory logic */ },
-                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD6CBAF))
+                                        onClick = { onViewInventory(point.name) },
+                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6B9BD8))
                                     ) {
-                                        Text("Ver inventario", color = Color.Black)
+                                        Text("Ver inventario", color = Color.White)
                                     }
                                 }
                             }

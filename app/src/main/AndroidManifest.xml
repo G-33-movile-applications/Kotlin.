@@ -105,5 +105,10 @@
             android:exported="true"
             android:theme="@style/Theme.MyMeds"/>
 
+        <!-- Servicio detección conducción -->
+        <service android:name=".services.DrivingDetector"
+            android:enabled="true"
+            android:exported="false" />
+
     </application>
 </manifest>

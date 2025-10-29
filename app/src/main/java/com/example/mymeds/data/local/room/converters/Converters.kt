@@ -4,6 +4,7 @@ import androidx.room.TypeConverter
 import com.example.mymeds.models.DeliveryType
 import com.example.mymeds.models.OrderStatus
 
+
 /**
  * TypeConverter para Room
  * Convierte enums a/desde base de datos

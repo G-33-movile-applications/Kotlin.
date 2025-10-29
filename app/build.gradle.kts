@@ -7,6 +7,8 @@ plugins {
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.google.services)
     alias(libs.plugins.ksp)
+    
+
 }
 
 android {
@@ -65,6 +67,7 @@ ksp {
 configurations.configureEach {
     exclude(group = "com.intellij", module = "annotations")
 }
+
 
 dependencies {
     // ✅ Fuerza 1 sola lib de anotaciones (JetBrains)

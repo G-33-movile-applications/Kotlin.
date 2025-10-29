@@ -13,9 +13,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -45,7 +43,7 @@ class HomeActivity : ComponentActivity() {
 
                 Scaffold(
                     floatingActionButton = {
-                        // Boton que simula que se está conduciendo
+                        // Botón para simular conducción (solo debug)
                         FloatingActionButton(
                             onClick = { mainViewModel.toggleDrivingModeForDebug() },
                             containerColor = MaterialTheme.colorScheme.tertiary,
@@ -67,17 +65,17 @@ class HomeActivity : ComponentActivity() {
                         HomeScreen(
                             onMapClick = { navigateToMap() },
 
-                            // Si se está conduciendo se bloquean las demás
+                            // Si se está conduciendo, se bloquean estas
                             onUploadPrescriptionClick = { if (!isDriving) navigateToUploadPrescription() },
                             onProfileClick = { if (!isDriving) navigateToProfile() },
                             onOrdersClick = { if (!isDriving) navigateToOrders() },
+                            onPrescriptionsClick = { if (!isDriving) navigateToPrescriptions() },
 
-                            // No se modifican si se está conduciendo
+                            // Siempre disponibles
                             onNotificationsClick = { showNotifications() },
                             onLogoutClick = { logout() }
                         )
 
-                        // Si se está conduciendo el overlay sucede
                         if (isDriving) {
                             DrivingModeOverlay(
                                 message = "Por tu seguridad, algunas funciones están desactivadas mientras conduces."
@@ -89,7 +87,6 @@ class HomeActivity : ComponentActivity() {
         }
     }
 
-    // --- These navigation functions remain the same ---
     private fun navigateToMap() {
         startActivity(Intent(this, MapActivity::class.java))
     }
@@ -106,8 +103,12 @@ class HomeActivity : ComponentActivity() {
         startActivity(Intent(this, OrdersManagementActivity::class.java))
     }
 
+    private fun navigateToPrescriptions() {
+        startActivity(Intent(this, PrescriptionsActivity::class.java))
+    }
+
     private fun showNotifications() {
-        // Implementar lógica de notificaciones
+        // TODO: Implementar lógica de notificaciones
     }
 
     private fun logout() {
@@ -117,9 +118,6 @@ class HomeActivity : ComponentActivity() {
     }
 }
 
-// No changes are needed for HomeScreen, FunctionalityCard, or the Preview.
-// The composables below are exactly as you provided them.
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
@@ -128,8 +126,13 @@ fun HomeScreen(
     onProfileClick: () -> Unit = {},
     onNotificationsClick: () -> Unit = {},
     onLogoutClick: () -> Unit = {},
-    onOrdersClick: () -> Unit = {}
+    onOrdersClick: () -> Unit = {},
+    onPrescriptionsClick: () -> Unit = {}
 ) {
+    // Tabs: "Tus pedidos" / "Tus prescripciones"
+    val tabs = listOf("Tus pedidos", "Tus prescripciones")
+    var selectedTab by remember { mutableStateOf(0) }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -169,8 +172,84 @@ fun HomeScreen(
                 .padding(paddingValues)
                 .background(Color(0xFFF5F5F5))
                 .verticalScroll(rememberScrollState())
-                .padding(top = 16.dp)
         ) {
+            // ===== Selector justo debajo del header =====
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFFCBDEF3)),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "Gestionar",
+                        fontSize = 12.sp,
+                        color = Color(0xFF5A7A9B),
+                        fontWeight = FontWeight.Medium,
+                        letterSpacing = 0.5.sp
+                    )
+                    Spacer(Modifier.height(8.dp))
+
+                    TabRow(
+                        selectedTabIndex = selectedTab,
+                        containerColor = Color(0xFFB3CEE8),
+                        contentColor = Color.Black,
+                        indicator = { /* sin indicador para estilo plano */ }
+                    ) {
+                        tabs.forEachIndexed { index, title ->
+                            Tab(
+                                selected = selectedTab == index,
+                                onClick = { selectedTab = index },
+                                text = {
+                                    Text(
+                                        title,
+                                        color = Color.Black,
+                                        fontWeight = if (selectedTab == index) FontWeight.Bold else FontWeight.Normal
+                                    )
+                                },
+                                icon = {
+                                    val icon: ImageVector =
+                                        if (index == 0) Icons.Filled.ShoppingCart else Icons.Filled.Description
+                                    Icon(icon, contentDescription = null, tint = Color.Black)
+                                },
+                                selectedContentColor = Color.Black,
+                                unselectedContentColor = Color.Black
+                            )
+                        }
+                    }
+
+                    Spacer(Modifier.height(12.dp))
+
+                    // CTA principal dependiente de la pestaña
+                    Button(
+                        onClick = { if (selectedTab == 0) onOrdersClick() else onPrescriptionsClick() },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.White),
+                        elevation = ButtonDefaults.buttonElevation(defaultElevation = 0.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (selectedTab == 0) Icons.Filled.ShoppingCart else Icons.Filled.Description,
+                            contentDescription = null,
+                            tint = Color.Black
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = if (selectedTab == 0) "Ver pedidos" else "Ver prescripciones",
+                            color = Color.Black,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+            }
+
+            // ===== Resto de funcionalidades =====
+            Spacer(modifier = Modifier.height(4.dp))
             FunctionalityCard(
                 title = "Ver mapa de farmacias",
                 description = "Encuentra sucursales EPS cercanas, horarios y stock estimado.",
@@ -187,14 +266,7 @@ fun HomeScreen(
                 onClick = onUploadPrescriptionClick
             )
             Spacer(modifier = Modifier.height(16.dp))
-            FunctionalityCard(
-                title = "Gestionar pedidos",
-                description = "Crea pedidos, revisa estados y descarga recibos.",
-                icon = Icons.Filled.ShoppingCart,
-                buttonText = "Ver pedidos",
-                onClick = onOrdersClick
-            )
-            Spacer(modifier = Modifier.height(16.dp))
+            // Ya no repetimos “Gestionar pedidos” aquí: quedó arriba.
             FunctionalityCard(
                 title = "Ver tu perfil",
                 description = "Datos del usuario, preferencias y accesibilidad.",

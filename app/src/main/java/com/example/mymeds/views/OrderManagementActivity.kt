@@ -1,13 +1,20 @@
 package com.example.mymeds.views
 
+import android.Manifest
+import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
+import android.content.pm.PackageManager
+import android.location.Geocoder
+import android.location.Location
 import android.os.Bundle
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -25,656 +32,281 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.datastore.core.DataStore
-import androidx.datastore.preferences.core.*
-import androidx.datastore.preferences.preferencesDataStore
+import androidx.core.app.ActivityCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import androidx.room.*
-import androidx.room.Entity
-import androidx.room.PrimaryKey
+import com.example.mymeds.models.*
+import com.example.mymeds.repository.OrdersRepository
+import com.example.mymeds.repository.PharmacyInventoryRepository
+import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
+import com.google.android.gms.tasks.CancellationTokenSource
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
-import kotlinx.coroutines.tasks.await
-import java.io.File
-import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.*
-import androidx.datastore.preferences.core.Preferences
+import kotlin.math.*
 
-private const val TAG = "OrdersActivity"
+private const val TAG = "OrdersManagementActivity"
 
 /**
  * ╔══════════════════════════════════════════════════════════════════════════╗
- * ║           SISTEMA DE PEDIDOS CON MÚLTIPLES TECNOLOGÍAS                   ║
- * ║                    DE PERSISTENCIA DE DATOS                              ║
+ * ║     SISTEMA COMPLETO DE PEDIDOS CON INTEGRACIÓN DE FARMACIAS            ║
+ * ║         GPS, INVENTARIO, CARRITO Y RASTREO DE PEDIDOS                   ║
  * ╚══════════════════════════════════════════════════════════════════════════╝
- *
- * IMPLEMENTACIÓN DE REQUISITOS DE PERSISTENCIA:
- *
- * 1. BD RELACIONAL (Room) - 10 PUNTOS
- *    - Tablas: Medications, Orders, OrderItems
- *    - Relaciones: One-to-Many, Many-to-Many
- *    - DAOs con operaciones CRUD completas
- *    - TypeConverters para tipos complejos
- *
- * 2. BD LLAVE/VALOR (DataStore) - 5 PUNTOS
- *    - Preferencias de usuario (modo entrega, direcciones)
- *    - Configuración de la app
- *    - Almacenamiento tipo key-value asíncrono
- *
- * 3. ARCHIVOS LOCALES - 5 PUNTOS
- *    - Guardado de comprobantes/recibos en JSON
- *    - Almacenamiento en directorio privado de la app
- *    - Operaciones de lectura/escritura de archivos
- *
- * 4. PREFERENCES/DATASTORE - 5 PUNTOS
- *    - SharedPreferences para configuraciones rápidas
- *    - Caché de última sincronización
- *    - Flags de estado de la app
- *
- * TOTAL: 25 PUNTOS
  */
 
+// Paleta de colores personalizada
+val CustomBlue1 = Color(0xFF9FB3DF)
+val CustomBlue2 = Color(0xFF9EC6F3)
+val CustomBlue3 = Color(0xFFBDDDE4)
+
 class OrdersManagementActivity : ComponentActivity() {
-    private val vm: OrdersViewModel by viewModels {
-        OrdersViewModelFactory(applicationContext)
+    private val vm: EnhancedOrdersViewModel by viewModels {
+        EnhancedOrdersViewModelFactory(applicationContext)
     }
+
+    private lateinit var fusedLocationClient: FusedLocationProviderClient
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+
+        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
+
         setContent {
-            OrdersManagementScreen(vm = vm, finish = { finish() })
-        }
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// 1. BD RELACIONAL - ROOM (10 PUNTOS)
-// ═══════════════════════════════════════════════════════════════════════════
-
-/**
- * ENTIDAD: Medication
- * Representa un medicamento en la base de datos local
- */
-@Entity(tableName = "medications")
-data class MedicationEntity(
-    @PrimaryKey
-    val medicationId: String,
-    val name: String,
-    val doseMg: Int,
-    val frequencyHours: Int,
-    val stockQuantity: Int,
-    val prescriptionId: String,
-    val active: Boolean,
-    val lastSyncedAt: Long,
-    val firebaseDocId: String? = null
-)
-
-/**
- * ENTIDAD: Order
- * Representa un pedido de medicamentos
- */
-@Entity(
-    tableName = "orders",
-    indices = [Index(value = ["userId"])]
-)
-data class OrderEntity(
-    @PrimaryKey(autoGenerate = true)
-    val orderId: Long = 0,
-    val userId: String,
-    val orderDate: Long,
-    val deliveryType: DeliveryType,
-    val deliveryAddress: String?,
-    val status: OrderStatus,
-    val totalItems: Int,
-    val notes: String?,
-    val createdAt: Long,
-    val syncedToFirebase: Boolean = false,
-    val firebaseOrderId: String? = null
-)
-
-/**
- * ENTIDAD: OrderItem
- * Representa un ítem dentro de un pedido (relación Many-to-Many)
- */
-@Entity(
-    tableName = "order_items",
-    foreignKeys = [
-        ForeignKey(
-            entity = OrderEntity::class,
-            parentColumns = ["orderId"],
-            childColumns = ["orderId"],
-            onDelete = ForeignKey.CASCADE
-        ),
-        ForeignKey(
-            entity = MedicationEntity::class,
-            parentColumns = ["medicationId"],
-            childColumns = ["medicationId"],
-            onDelete = ForeignKey.RESTRICT
-        )
-    ],
-    indices = [Index(value = ["orderId"]), Index(value = ["medicationId"])]
-)
-data class OrderItemEntity(
-    @PrimaryKey(autoGenerate = true)
-    val itemId: Long = 0,
-    val orderId: Long,
-    val medicationId: String,
-    val quantity: Int,
-    val medicationName: String,
-    val doseMg: Int
-)
-
-enum class DeliveryType {
-    HOME_DELIVERY,      // Entrega a domicilio
-    IN_PERSON_PICKUP    // Recoger presencialmente
-}
-
-enum class OrderStatus {
-    PENDING,      // Pendiente
-    CONFIRMED,    // Confirmado
-    IN_TRANSIT,   // En camino
-    DELIVERED,    // Entregado
-    CANCELLED     // Cancelado
-}
-
-/**
- * TypeConverter para Room - Convierte enums a/desde base de datos
- */
-class Converters {
-    @TypeConverter
-    fun fromDeliveryType(value: DeliveryType): String = value.name
-
-    @TypeConverter
-    fun toDeliveryType(value: String): DeliveryType = DeliveryType.valueOf(value)
-
-    @TypeConverter
-    fun fromOrderStatus(value: OrderStatus): String = value.name
-
-    @TypeConverter
-    fun toOrderStatus(value: String): OrderStatus = OrderStatus.valueOf(value)
-}
-
-/**
- * DAO: MedicationDao
- * Operaciones de base de datos para medicamentos
- */
-@Dao
-interface MedicationDao {
-    @Query("SELECT * FROM medications WHERE active = 1 ORDER BY name ASC")
-    fun getAllActiveMedications(): Flow<List<MedicationEntity>>
-
-    @Query("SELECT * FROM medications WHERE medicationId = :id")
-    suspend fun getMedicationById(id: String): MedicationEntity?
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertMedication(medication: MedicationEntity)
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertAll(medications: List<MedicationEntity>)
-
-    @Update
-    suspend fun updateMedication(medication: MedicationEntity)
-
-    @Query("UPDATE medications SET stockQuantity = :quantity WHERE medicationId = :id")
-    suspend fun updateStock(id: String, quantity: Int)
-
-    @Query("DELETE FROM medications WHERE medicationId = :id")
-    suspend fun deleteMedication(id: String)
-
-    @Query("DELETE FROM medications")
-    suspend fun deleteAll()
-}
-
-/**
- * DAO: OrderDao
- * Operaciones de base de datos para pedidos
- */
-@Dao
-interface OrderDao {
-    @Query("SELECT * FROM orders WHERE userId = :userId ORDER BY orderDate DESC")
-    fun getUserOrders(userId: String): Flow<List<OrderEntity>>
-
-    @Query("SELECT * FROM orders WHERE orderId = :id")
-    suspend fun getOrderById(id: Long): OrderEntity?
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertOrder(order: OrderEntity): Long
-
-    @Update
-    suspend fun updateOrder(order: OrderEntity)
-
-    @Query("UPDATE orders SET status = :status WHERE orderId = :id")
-    suspend fun updateOrderStatus(id: Long, status: OrderStatus)
-
-    @Query("DELETE FROM orders WHERE orderId = :id")
-    suspend fun deleteOrder(id: Long)
-}
-
-/**
- * DAO: OrderItemDao
- * Operaciones para ítems de pedidos
- */
-@Dao
-interface OrderItemDao {
-    @Query("SELECT * FROM order_items WHERE orderId = :orderId")
-    suspend fun getOrderItems(orderId: Long): List<OrderItemEntity>
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertOrderItem(item: OrderItemEntity)
-
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertAll(items: List<OrderItemEntity>)
-
-    @Query("DELETE FROM order_items WHERE orderId = :orderId")
-    suspend fun deleteOrderItems(orderId: Long)
-}
-
-/**
- * Data class para JOIN de Order con sus Items
- */
-data class OrderWithItems(
-    @Embedded val order: OrderEntity,
-    @Relation(
-        parentColumn = "orderId",
-        entityColumn = "orderId"
-    )
-    val items: List<OrderItemEntity>
-)
-
-/**
- * BASE DE DATOS ROOM PRINCIPAL
- */
-@Database(
-    entities = [
-        MedicationEntity::class,
-        OrderEntity::class,
-        OrderItemEntity::class
-    ],
-    version = 1,
-    exportSchema = false
-)
-@TypeConverters(Converters::class)
-abstract class AppDatabase : RoomDatabase() {
-    abstract fun medicationDao(): MedicationDao
-    abstract fun orderDao(): OrderDao
-    abstract fun orderItemDao(): OrderItemDao
-
-    companion object {
-        @Volatile
-        private var INSTANCE: AppDatabase? = null
-
-        fun getDatabase(context: Context): AppDatabase {
-            return INSTANCE ?: synchronized(this) {
-                val instance = Room.databaseBuilder(
-                    context.applicationContext,
-                    AppDatabase::class.java,
-                    "mymeds_database"
+            MaterialTheme(
+                colorScheme = lightColorScheme(
+                    primary = CustomBlue2,
+                    primaryContainer = CustomBlue3,
+                    secondary = CustomBlue1,
+                    tertiary = CustomBlue2,
+                    surface = Color.White,
+                    background = Color(0xFFF5F5F5)
                 )
-                    .fallbackToDestructiveMigration()
-                    .build()
-                INSTANCE = instance
-                instance
+            ) {
+                EnhancedOrdersManagementScreen(
+                    vm = vm,
+                    fusedLocationClient = fusedLocationClient,
+                    finish = { finish() }
+                )
             }
         }
     }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 2. BD LLAVE/VALOR - DATASTORE (5 PUNTOS)
+// ENHANCED VIEWMODEL
 // ═══════════════════════════════════════════════════════════════════════════
 
-/**
- * DATASTORE: Preferences
- * Almacenamiento tipo key-value para preferencias de usuario
- */
-// Removed 'private' to make it accessible within the module
-val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "user_preferences")
-
-
-object PreferencesKeys {
-    val DEFAULT_DELIVERY_TYPE = stringPreferencesKey("default_delivery_type")
-    val DEFAULT_ADDRESS = stringPreferencesKey("default_address")
-    val PHONE_NUMBER = stringPreferencesKey("phone_number")
-    val LAST_SYNC_TIMESTAMP = longPreferencesKey("last_sync_timestamp")
-    val NOTIFICATIONS_ENABLED = booleanPreferencesKey("notifications_enabled")
-    val AUTO_REORDER_ENABLED = booleanPreferencesKey("auto_reorder_enabled")
-}
-
-/**
- * Manager para DataStore
- */
-class UserPreferencesManager(private val context: Context) {
-    private val dataStore = context.dataStore
-
-    // Leer preferencia de tipo de entrega
-    val defaultDeliveryType: Flow<DeliveryType> = dataStore.data
-        .map { preferences ->
-            val typeString = preferences[PreferencesKeys.DEFAULT_DELIVERY_TYPE] ?: DeliveryType.HOME_DELIVERY.name
-            DeliveryType.valueOf(typeString)
-        }
-
-    // Leer dirección predeterminada
-    val defaultAddress: Flow<String> = dataStore.data
-        .map { preferences ->
-            preferences[PreferencesKeys.DEFAULT_ADDRESS] ?: ""
-        }
-
-    // Guardar preferencia de entrega
-    suspend fun saveDefaultDeliveryType(type: DeliveryType) {
-        dataStore.edit { preferences ->
-            preferences[PreferencesKeys.DEFAULT_DELIVERY_TYPE] = type.name
-        }
-        Log.d(TAG, "💾 [DataStore] Tipo de entrega guardado: $type")
-    }
-
-    // Guardar dirección predeterminada
-    suspend fun saveDefaultAddress(address: String) {
-        dataStore.edit { preferences ->
-            preferences[PreferencesKeys.DEFAULT_ADDRESS] = address
-        }
-        Log.d(TAG, "💾 [DataStore] Dirección guardada: $address")
-    }
-
-    // Guardar timestamp de última sincronización
-    suspend fun saveLastSyncTimestamp(timestamp: Long) {
-        dataStore.edit { preferences ->
-            preferences[PreferencesKeys.LAST_SYNC_TIMESTAMP] = timestamp
-        }
-    }
-
-    // Leer última sincronización
-    val lastSyncTimestamp: Flow<Long> = dataStore.data
-        .map { preferences ->
-            preferences[PreferencesKeys.LAST_SYNC_TIMESTAMP] ?: 0L
-        }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// 3. ARCHIVOS LOCALES (5 PUNTOS)
-// ═══════════════════════════════════════════════════════════════════════════
-
-/**
- * Manager para archivos locales
- * Guarda comprobantes/recibos de pedidos en JSON
- */
-class LocalFileManager(private val context: Context) {
-    private val receiptsDir = File(context.filesDir, "receipts")
-
-    init {
-        if (!receiptsDir.exists()) {
-            receiptsDir.mkdirs()
-            Log.d(TAG, "📁 [Files] Directorio de recibos creado: ${receiptsDir.absolutePath}")
-        }
-    }
-
-    /**
-     * Guarda un recibo de pedido en archivo JSON
-     */
-    suspend fun saveOrderReceipt(order: OrderWithItems): File? = withContext(Dispatchers.IO) {
-        try {
-            val fileName = "receipt_${order.order.orderId}_${System.currentTimeMillis()}.json"
-            val file = File(receiptsDir, fileName)
-
-            val receiptData = buildString {
-                appendLine("{")
-                appendLine("  \"orderId\": \"${order.order.orderId}\",")
-                appendLine("  \"date\": \"${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date(order.order.orderDate))}\",")
-                appendLine("  \"deliveryType\": \"${order.order.deliveryType}\",")
-                appendLine("  \"status\": \"${order.order.status}\",")
-                appendLine("  \"items\": [")
-                order.items.forEachIndexed { index, item ->
-                    appendLine("    {")
-                    appendLine("      \"name\": \"${item.medicationName}\",")
-                    appendLine("      \"dose\": \"${item.doseMg}mg\",")
-                    appendLine("      \"quantity\": ${item.quantity}")
-                    appendLine("    }${if (index < order.items.size - 1) "," else ""}")
-                }
-                appendLine("  ]")
-                appendLine("}")
-            }
-
-            FileOutputStream(file).use { output ->
-                output.write(receiptData.toByteArray())
-            }
-
-            Log.d(TAG, "📄 [Files] Recibo guardado: ${file.absolutePath}")
-            file
-        } catch (e: Exception) {
-            Log.e(TAG, "❌ [Files] Error guardando recibo", e)
-            null
-        }
-    }
-
-    /**
-     * Lee un recibo desde archivo
-     */
-    suspend fun readOrderReceipt(orderId: Long): String? = withContext(Dispatchers.IO) {
-        try {
-            val files = receiptsDir.listFiles { _, name ->
-                name.startsWith("receipt_$orderId")
-            }
-
-            if (files.isNullOrEmpty()) {
-                Log.w(TAG, "⚠️ [Files] No se encontró recibo para pedido $orderId")
-                return@withContext null
-            }
-
-            val content = files.first().readText()
-            Log.d(TAG, "📄 [Files] Recibo leído para pedido $orderId")
-            content
-        } catch (e: Exception) {
-            Log.e(TAG, "❌ [Files] Error leyendo recibo", e)
-            null
-        }
-    }
-
-    /**
-     * Lista todos los recibos guardados
-     */
-    fun getAllReceipts(): List<File> {
-        return receiptsDir.listFiles()?.toList() ?: emptyList()
-    }
-
-    /**
-     * Elimina un recibo
-     */
-    suspend fun deleteReceipt(orderId: Long): Boolean = withContext(Dispatchers.IO) {
-        try {
-            val files = receiptsDir.listFiles { _, name ->
-                name.startsWith("receipt_$orderId")
-            }
-
-            files?.forEach { it.delete() }
-            Log.d(TAG, "🗑️ [Files] Recibo eliminado para pedido $orderId")
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "❌ [Files] Error eliminando recibo", e)
-            false
-        }
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// 4. SHAREDPREFERENCES (5 PUNTOS)
-// ═══════════════════════════════════════════════════════════════════════════
-
-/**
- * Manager para SharedPreferences
- * Configuraciones rápidas y flags de estado
- */
-class SharedPrefsManager(context: Context) {
-    private val prefs = context.getSharedPreferences("mymeds_prefs", Context.MODE_PRIVATE)
-
-    // Guardar flag de primera ejecución
-    fun setFirstTimeLaunch(isFirst: Boolean) {
-        prefs.edit().putBoolean("first_time_launch", isFirst).apply()
-        Log.d(TAG, "💾 [SharedPrefs] Primera ejecución: $isFirst")
-    }
-
-    fun isFirstTimeLaunch(): Boolean {
-        return prefs.getBoolean("first_time_launch", true)
-    }
-
-    // Guardar último ID de pedido procesado
-    fun setLastOrderId(orderId: Long) {
-        prefs.edit().putLong("last_order_id", orderId).apply()
-        Log.d(TAG, "💾 [SharedPrefs] Último pedido: $orderId")
-    }
-
-    fun getLastOrderId(): Long {
-        return prefs.getLong("last_order_id", 0L)
-    }
-
-    // Contador de pedidos realizados
-    fun incrementOrderCount() {
-        val current = prefs.getInt("order_count", 0)
-        prefs.edit().putInt("order_count", current + 1).apply()
-        Log.d(TAG, "💾 [SharedPrefs] Contador de pedidos: ${current + 1}")
-    }
-
-    fun getOrderCount(): Int {
-        return prefs.getInt("order_count", 0)
-    }
-
-    // Cache de última sincronización (timestamp)
-    fun setLastSyncTime(timestamp: Long) {
-        prefs.edit().putLong("last_sync_time", timestamp).apply()
-    }
-
-    fun getLastSyncTime(): Long {
-        return prefs.getLong("last_sync_time", 0L)
-    }
-
-    // Modo de vista preferido (lista/grid)
-    fun setViewMode(mode: String) {
-        prefs.edit().putString("view_mode", mode).apply()
-    }
-
-    fun getViewMode(): String {
-        return prefs.getString("view_mode", "list") ?: "list"
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// VIEWMODEL - Lógica de negocio
-// ═══════════════════════════════════════════════════════════════════════════
-
-class OrdersViewModel(
+class EnhancedOrdersViewModel(
     private val context: Context
 ) : ViewModel() {
 
-    private val database = AppDatabase.getDatabase(context)
-    private val medicationDao = database.medicationDao()
-    private val orderDao = database.orderDao()
-    private val orderItemDao = database.orderItemDao()
-
-    private val preferencesManager = UserPreferencesManager(context)
-    private val fileManager = LocalFileManager(context)
-    private val sharedPrefs = SharedPrefsManager(context)
-
+    private val ordersRepository = OrdersRepository()
+    private val pharmacyRepository = PharmacyInventoryRepository()
     private val firestore = FirebaseFirestore.getInstance()
     private val auth = FirebaseAuth.getInstance()
 
-    // Estados observables
-    val medications = medicationDao.getAllActiveMedications()
-        .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
+    private val _uiState = MutableStateFlow<OrderUiState>(OrderUiState.Loading)
+    val uiState: StateFlow<OrderUiState> = _uiState.asStateFlow()
 
-    val orders = auth.currentUser?.uid?.let { userId ->
-        orderDao.getUserOrders(userId)
-            .stateIn(viewModelScope, SharingStarted.Lazily, emptyList())
-    } ?: MutableStateFlow(emptyList())
+    private val _nearbyPharmacies = MutableStateFlow<List<PharmacyWithDistance>>(emptyList())
+    val nearbyPharmacies: StateFlow<List<PharmacyWithDistance>> = _nearbyPharmacies.asStateFlow()
 
-    val defaultDeliveryType = preferencesManager.defaultDeliveryType
-        .stateIn(viewModelScope, SharingStarted.Lazily, DeliveryType.HOME_DELIVERY)
+    private val _selectedPharmacy = MutableStateFlow<PhysicalPoint?>(null)
+    val selectedPharmacy: StateFlow<PhysicalPoint?> = _selectedPharmacy.asStateFlow()
 
-    val defaultAddress = preferencesManager.defaultAddress
-        .stateIn(viewModelScope, SharingStarted.Lazily, "")
+    private val _pharmacyInventory = MutableStateFlow<List<InventoryMedication>>(emptyList())
+    val pharmacyInventory: StateFlow<List<InventoryMedication>> = _pharmacyInventory.asStateFlow()
+
+    private val _cart = MutableStateFlow(ShoppingCart())
+    val cart: StateFlow<ShoppingCart> = _cart.asStateFlow()
+
+    private val _userLocation = MutableStateFlow<Location?>(null)
+    val userLocation: StateFlow<Location?> = _userLocation.asStateFlow()
+
+    private val _detectedAddress = MutableStateFlow<String>("")
+    val detectedAddress: StateFlow<String> = _detectedAddress.asStateFlow()
+
+    private val _userOrders = MutableStateFlow<List<MedicationOrder>>(emptyList())
+    val userOrders: StateFlow<List<MedicationOrder>> = _userOrders.asStateFlow()
 
     var isLoading by mutableStateOf(false)
         private set
 
-    var selectedMedications by mutableStateOf<List<MedicationEntity>>(emptyList())
-        private set
-
     init {
-        Log.d(TAG, "🎯 OrdersViewModel inicializado")
-        Log.d(TAG, "📊 [SharedPrefs] Total de pedidos históricos: ${sharedPrefs.getOrderCount()}")
-
-        // Sincroniza datos de Firebase a Room
-        syncMedicationsFromFirebase()
+        Log.d(TAG, "🎯 EnhancedOrdersViewModel inicializado")
+        loadNearbyPharmacies()
+        loadUserOrders()
     }
 
-    /**
-     * Sincroniza medicamentos desde Firebase a Room
-     * (BD RELACIONAL + Operaciones de red)
-     */
-    private fun syncMedicationsFromFirebase() {
-        val userId = auth.currentUser?.uid ?: return
-
-        viewModelScope.launch(Dispatchers.IO) {
+    fun loadNearbyPharmacies() {
+        viewModelScope.launch {
             try {
-                Log.d(TAG, "🔄 Sincronizando medicamentos desde Firebase...")
+                Log.d(TAG, "📍 Cargando farmacias cercanas...")
+                _uiState.value = OrderUiState.Loading
 
-                val snapshot = firestore
-                    .collection("usuarios")
-                    .document(userId)
-                    .collection("medicamentosUsuario")
-                    .whereEqualTo("active", true)
-                    .get()
-                    .await()
+                val result = pharmacyRepository.getAllPharmacies()
 
-                val medicationEntities = snapshot.documents.mapNotNull { doc ->
-                    try {
-                        MedicationEntity(
-                            medicationId = doc.getString("medicationId") ?: return@mapNotNull null,
-                            name = doc.getString("name") ?: "Sin nombre",
-                            doseMg = doc.getLong("doseMg")?.toInt() ?: 0,
-                            frequencyHours = doc.getLong("frequencyHours")?.toInt() ?: 24,
-                            stockQuantity = 30, // Default
-                            prescriptionId = doc.getString("prescriptionId") ?: "",
-                            active = doc.getBoolean("active") ?: true,
-                            lastSyncedAt = System.currentTimeMillis(),
-                            firebaseDocId = doc.id
-                        )
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error parseando medicamento", e)
-                        null
+                if (result.isSuccess) {
+                    val pharmacies = result.getOrNull() ?: emptyList()
+                    val userLoc = _userLocation.value
+
+                    val pharmaciesWithDistance = if (userLoc != null) {
+                        pharmacies.map { pharmacy ->
+                            val distance = calculateDistance(
+                                userLoc.latitude,
+                                userLoc.longitude,
+                                pharmacy.location.latitude,
+                                pharmacy.location.longitude
+                            )
+                            PharmacyWithDistance(pharmacy, distance)
+                        }.sortedBy { it.distanceKm }
+                    } else {
+                        pharmacies.map { PharmacyWithDistance(it, null) }
                     }
+
+                    _nearbyPharmacies.value = pharmaciesWithDistance
+                    _uiState.value = OrderUiState.Success
+                    Log.d(TAG, "✅ ${pharmaciesWithDistance.size} farmacias cargadas")
+                } else {
+                    val error = result.exceptionOrNull()
+                    Log.e(TAG, "❌ Error cargando farmacias: ${error?.message}")
+                    _uiState.value = OrderUiState.Error(error?.message ?: "Error desconocido")
                 }
-
-                // Guarda en Room
-                medicationDao.insertAll(medicationEntities)
-
-                // Actualiza timestamp en DataStore
-                preferencesManager.saveLastSyncTimestamp(System.currentTimeMillis())
-
-                // Actualiza SharedPrefs
-                sharedPrefs.setLastSyncTime(System.currentTimeMillis())
-
-                Log.d(TAG, "✅ Sincronización completada: ${medicationEntities.size} medicamentos")
-
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Error en sincronización", e)
+                Log.e(TAG, "❌ Error en loadNearbyPharmacies", e)
+                _uiState.value = OrderUiState.Error(e.message ?: "Error desconocido")
             }
         }
     }
 
-    /**
-     * Crea un nuevo pedido
-     * (Usa TODAS las tecnologías: Room + DataStore + Files + SharedPrefs + Firebase)
-     */
+    fun updateUserLocation(location: Location) {
+        viewModelScope.launch {
+            _userLocation.value = location
+            Log.d(TAG, "📍 Ubicación actualizada: ${location.latitude}, ${location.longitude}")
+            loadNearbyPharmacies()
+            detectAddress(location)
+        }
+    }
+
+    private fun detectAddress(location: Location) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val geocoder = Geocoder(context, Locale.getDefault())
+                val addresses = geocoder.getFromLocation(location.latitude, location.longitude, 1)
+
+                if (!addresses.isNullOrEmpty()) {
+                    val address = addresses[0]
+                    val fullAddress = buildString {
+                        if (address.thoroughfare != null) append("${address.thoroughfare} ")
+                        if (address.subThoroughfare != null) append("${address.subThoroughfare}, ")
+                        if (address.locality != null) append("${address.locality}, ")
+                        if (address.adminArea != null) append("${address.adminArea}")
+                    }.trim()
+
+                    _detectedAddress.value = fullAddress
+                    Log.d(TAG, "📍 Dirección detectada: $fullAddress")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Error detectando dirección", e)
+            }
+        }
+    }
+
+    private fun calculateDistance(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+        val earthRadius = 6371.0
+        val dLat = Math.toRadians(lat2 - lat1)
+        val dLon = Math.toRadians(lon2 - lon1)
+        val a = sin(dLat / 2) * sin(dLat / 2) +
+                cos(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) *
+                sin(dLon / 2) * sin(dLon / 2)
+        val c = 2 * atan2(sqrt(a), sqrt(1 - a))
+        return earthRadius * c
+    }
+
+    fun selectPharmacy(pharmacy: PhysicalPoint) {
+        viewModelScope.launch {
+            try {
+                Log.d(TAG, "🏪 Farmacia seleccionada: ${pharmacy.name}")
+                _selectedPharmacy.value = pharmacy
+                _uiState.value = OrderUiState.Loading
+
+                val result = pharmacyRepository.getPharmacyInventoryWithDetails(pharmacy.id)
+
+                if (result.isSuccess) {
+                    val inventory = result.getOrNull() ?: emptyList()
+                    _pharmacyInventory.value = inventory
+                    _cart.value = ShoppingCart(
+                        pharmacyId = pharmacy.id,
+                        pharmacyName = pharmacy.name
+                    )
+                    _uiState.value = OrderUiState.Success
+                    Log.d(TAG, "✅ Inventario cargado: ${inventory.size} medicamentos")
+                } else {
+                    val error = result.exceptionOrNull()
+                    Log.e(TAG, "❌ Error cargando inventario: ${error?.message}")
+                    _uiState.value = OrderUiState.Error(error?.message ?: "Error cargando inventario")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Error en selectPharmacy", e)
+                _uiState.value = OrderUiState.Error(e.message ?: "Error desconocido")
+            }
+        }
+    }
+
+    fun deselectPharmacy() {
+        _selectedPharmacy.value = null
+        _pharmacyInventory.value = emptyList()
+        _cart.value = ShoppingCart()
+        Log.d(TAG, "🏪 Farmacia deseleccionada, carrito limpiado")
+    }
+
+    fun addToCart(medication: InventoryMedication, quantity: Int = 1) {
+        val currentCart = _cart.value
+        if (currentCart.pharmacyId != _selectedPharmacy.value?.id) {
+            Log.w(TAG, "⚠️ Farmacia no coincide con carrito actual")
+            return
+        }
+        currentCart.addItem(medication, quantity)
+        _cart.value = currentCart.copy()
+        Log.d(TAG, "🛒 Agregado al carrito: ${medication.nombre} x$quantity")
+    }
+
+    fun updateCartItemQuantity(medicationId: String, newQuantity: Int) {
+        val currentCart = _cart.value
+        currentCart.updateQuantity(medicationId, newQuantity)
+        _cart.value = currentCart.copy()
+        Log.d(TAG, "🛒 Cantidad actualizada: $medicationId -> $newQuantity")
+    }
+
+    fun removeFromCart(medicationId: String) {
+        val currentCart = _cart.value
+        currentCart.removeItem(medicationId)
+        _cart.value = currentCart.copy()
+        Log.d(TAG, "🛒 Removido del carrito: $medicationId")
+    }
+
+    fun clearCart() {
+        _cart.value = ShoppingCart(
+            pharmacyId = _selectedPharmacy.value?.id ?: "",
+            pharmacyName = _selectedPharmacy.value?.name ?: ""
+        )
+        Log.d(TAG, "🛒 Carrito limpiado")
+    }
+
     fun createOrder(
-        selectedMeds: List<Pair<MedicationEntity, Int>>,
         deliveryType: DeliveryType,
-        address: String?,
-        notes: String?,
-        onSuccess: () -> Unit,
+        deliveryAddress: String,
+        phoneNumber: String,
+        notes: String,
+        onSuccess: (String) -> Unit,
         onError: (String) -> Unit
     ) {
         val userId = auth.currentUser?.uid
@@ -683,146 +315,121 @@ class OrdersViewModel(
             return
         }
 
-        viewModelScope.launch(Dispatchers.IO) {
+        val pharmacy = _selectedPharmacy.value
+        if (pharmacy == null) {
+            onError("No hay farmacia seleccionada")
+            return
+        }
+
+        val currentCart = _cart.value
+        if (currentCart.isEmpty()) {
+            onError("El carrito está vacío")
+            return
+        }
+
+        viewModelScope.launch {
             try {
                 isLoading = true
-                Log.d(TAG, "📦 Creando nuevo pedido...")
+                Log.d(TAG, "📦 Creando pedido...")
 
-                // 1. ROOM: Crea el pedido en BD local
-                val order = OrderEntity(
+                val result = ordersRepository.createOrder(
+                    cart = currentCart,
                     userId = userId,
-                    orderDate = System.currentTimeMillis(),
+                    pharmacy = pharmacy,
                     deliveryType = deliveryType,
-                    deliveryAddress = address,
-                    status = OrderStatus.PENDING,
-                    totalItems = selectedMeds.sumOf { it.second },
-                    notes = notes,
-                    createdAt = System.currentTimeMillis(),
-                    syncedToFirebase = false
+                    deliveryAddress = deliveryAddress,
+                    phoneNumber = phoneNumber,
+                    notes = notes
                 )
 
-                val orderId = orderDao.insertOrder(order)
-                Log.d(TAG, "💾 [Room] Pedido guardado con ID: $orderId")
-
-                // 2. ROOM: Guarda los ítems del pedido
-                val items = selectedMeds.map { (med, qty) ->
-                    OrderItemEntity(
-                        orderId = orderId,
-                        medicationId = med.medicationId,
-                        quantity = qty,
-                        medicationName = med.name,
-                        doseMg = med.doseMg
-                    )
-                }
-                orderItemDao.insertAll(items)
-                Log.d(TAG, "💾 [Room] ${items.size} ítems guardados")
-
-                // 3. ARCHIVOS: Guarda recibo en JSON
-                val orderWithItems = OrderWithItems(
-                    order = order.copy(orderId = orderId),
-                    items = items
-                )
-                val receiptFile = fileManager.saveOrderReceipt(orderWithItems)
-                Log.d(TAG, "📄 [Files] Recibo guardado: ${receiptFile?.name}")
-
-                // 4. DATASTORE: Actualiza preferencias si es necesario
-                if (deliveryType != defaultDeliveryType.value) {
-                    preferencesManager.saveDefaultDeliveryType(deliveryType)
-                }
-                if (!address.isNullOrBlank() && address != defaultAddress.value) {
-                    preferencesManager.saveDefaultAddress(address)
-                }
-
-                // 5. SHAREDPREFS: Incrementa contador
-                sharedPrefs.incrementOrderCount()
-                sharedPrefs.setLastOrderId(orderId)
-
-                // 6. FIREBASE: Sincroniza a la nube
-                syncOrderToFirebase(orderWithItems)
-
-                withContext(Dispatchers.Main) {
+                if (result.isSuccess) {
+                    val orderId = result.getOrNull()!!
+                    clearCart()
+                    loadUserOrders()
                     isLoading = false
-                    onSuccess()
+                    onSuccess(orderId)
+                    Log.d(TAG, "✅ Pedido creado exitosamente: $orderId")
+                } else {
+                    val error = result.exceptionOrNull()!!
+                    isLoading = false
+                    onError(error.message ?: "Error creando pedido")
+                    Log.e(TAG, "❌ Error creando pedido: ${error.message}")
                 }
-
-                Log.d(TAG, "✅ Pedido creado exitosamente")
-
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Error creando pedido", e)
-                withContext(Dispatchers.Main) {
-                    isLoading = false
-                    onError(e.message ?: "Error desconocido")
-                }
+                isLoading = false
+                onError(e.message ?: "Error desconocido")
+                Log.e(TAG, "❌ Error en createOrder", e)
             }
         }
     }
 
-    /**
-     * Sincroniza un pedido a Firebase
-     */
-    private suspend fun syncOrderToFirebase(orderWithItems: OrderWithItems) = withContext(Dispatchers.IO) {
-        try {
-            val orderData = hashMapOf(
-                "userId" to orderWithItems.order.userId,
-                "orderDate" to Date(orderWithItems.order.orderDate),
-                "deliveryType" to orderWithItems.order.deliveryType.name,
-                "deliveryAddress" to orderWithItems.order.deliveryAddress,
-                "status" to orderWithItems.order.status.name,
-                "totalItems" to orderWithItems.order.totalItems,
-                "notes" to orderWithItems.order.notes,
-                "items" to orderWithItems.items.map { item ->
-                    hashMapOf(
-                        "medicationId" to item.medicationId,
-                        "medicationName" to item.medicationName,
-                        "doseMg" to item.doseMg,
-                        "quantity" to item.quantity
-                    )
-                },
-                "createdAt" to Date(orderWithItems.order.createdAt)
-            )
-
-            val docRef = firestore
-                .collection("usuarios")
-                .document(orderWithItems.order.userId)
-                .collection("pedidos")
-                .add(orderData)
-                .await()
-
-            // Actualiza el pedido local con el ID de Firebase
-            orderDao.updateOrder(
-                orderWithItems.order.copy(
-                    syncedToFirebase = true,
-                    firebaseOrderId = docRef.id
-                )
-            )
-
-            Log.d(TAG, "☁️ [Firebase] Pedido sincronizado: ${docRef.id}")
-
-        } catch (e: Exception) {
-            Log.e(TAG, "❌ [Firebase] Error sincronizando pedido", e)
+    fun loadUserOrders() {
+        val userId = auth.currentUser?.uid ?: return
+        viewModelScope.launch {
+            try {
+                Log.d(TAG, "📋 Cargando pedidos del usuario...")
+                val result = ordersRepository.getUserOrders(userId)
+                if (result.isSuccess) {
+                    val orders = result.getOrNull() ?: emptyList()
+                    _userOrders.value = orders
+                    Log.d(TAG, "✅ ${orders.size} pedidos cargados")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Error en loadUserOrders", e)
+            }
         }
     }
 
-    fun toggleMedicationSelection(medication: MedicationEntity) {
-        selectedMedications = if (selectedMedications.contains(medication)) {
-            selectedMedications - medication
-        } else {
-            selectedMedications + medication
+    fun cancelOrder(orderId: String, onSuccess: () -> Unit, onError: (String) -> Unit) {
+        val userId = auth.currentUser?.uid ?: return
+        viewModelScope.launch {
+            try {
+                isLoading = true
+                val result = ordersRepository.cancelOrder(userId, orderId)
+                if (result.isSuccess) {
+                    loadUserOrders()
+                    isLoading = false
+                    onSuccess()
+                } else {
+                    val error = result.exceptionOrNull()!!
+                    isLoading = false
+                    onError(error.message ?: "Error cancelando pedido")
+                }
+            } catch (e: Exception) {
+                isLoading = false
+                onError(e.message ?: "Error desconocido")
+            }
         }
-    }
-
-    fun clearSelection() {
-        selectedMedications = emptyList()
     }
 }
 
-class OrdersViewModelFactory(private val context: Context) : androidx.lifecycle.ViewModelProvider.Factory {
+class EnhancedOrdersViewModelFactory(
+    private val context: Context
+) : androidx.lifecycle.ViewModelProvider.Factory {
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
-        if (modelClass.isAssignableFrom(OrdersViewModel::class.java)) {
+        if (modelClass.isAssignableFrom(EnhancedOrdersViewModel::class.java)) {
             @Suppress("UNCHECKED_CAST")
-            return OrdersViewModel(context) as T
+            return EnhancedOrdersViewModel(context) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class")
+    }
+}
+
+sealed class OrderUiState {
+    object Loading : OrderUiState()
+    object Success : OrderUiState()
+    data class Error(val message: String) : OrderUiState()
+}
+
+data class PharmacyWithDistance(
+    val pharmacy: PhysicalPoint,
+    val distanceKm: Double?
+) {
+    fun getDistanceText(): String {
+        return distanceKm?.let {
+            if (it < 1.0) "${(it * 1000).toInt()}m"
+            else "${String.format("%.1f", it)}km"
+        } ?: "Distancia desconocida"
     }
 }
 
@@ -832,88 +439,264 @@ class OrdersViewModelFactory(private val context: Context) : androidx.lifecycle.
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun OrdersManagementScreen(vm: OrdersViewModel, finish: () -> Unit) {
-    val ctx = LocalContext.current
-    val activity = ctx as? Activity
+fun EnhancedOrdersManagementScreen(
+    vm: EnhancedOrdersViewModel,
+    fusedLocationClient: FusedLocationProviderClient,
+    finish: () -> Unit
+) {
+    val context = LocalContext.current
 
-    var showNewOrderDialog by remember { mutableStateOf(false) }
     var selectedTab by remember { mutableStateOf(0) }
+    var showCartSheet by remember { mutableStateOf(false) }
+    var showCheckoutDialog by remember { mutableStateOf(false) }
 
-    val medications by vm.medications.collectAsState()
-    val orders by vm.orders.collectAsState()
+    val nearbyPharmacies by vm.nearbyPharmacies.collectAsState()
+    val selectedPharmacy by vm.selectedPharmacy.collectAsState()
+    val pharmacyInventory by vm.pharmacyInventory.collectAsState()
+    val cart by vm.cart.collectAsState()
+    val userOrders by vm.userOrders.collectAsState()
+    val uiState by vm.uiState.collectAsState()
+    val detectedAddress by vm.detectedAddress.collectAsState()
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("Gestión de Pedidos", fontWeight = FontWeight.Bold) },
-                navigationIcon = {
-                    IconButton(onClick = finish) {
-                        Icon(Icons.Filled.ArrowBack, "Volver")
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer
-                )
-            )
-        },
-        floatingActionButton = {
-            if (selectedTab == 0 && medications.isNotEmpty()) {
-                FloatingActionButton(
-                    onClick = { showNewOrderDialog = true },
-                    containerColor = MaterialTheme.colorScheme.primary
-                ) {
-                    Icon(Icons.Filled.Add, "Nuevo pedido")
-                }
-            }
-        }
-    ) { pad ->
-        Column(
-            modifier = Modifier
-                .padding(pad)
-                .fillMaxSize()
+    val locationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        if (permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
+            permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
         ) {
-            // TABS
-            TabRow(selectedTabIndex = selectedTab) {
-                Tab(
-                    selected = selectedTab == 0,
-                    onClick = { selectedTab = 0 },
-                    text = { Text("Medicamentos") },
-                    icon = { Icon(Icons.Filled.MedicalServices, null) }
-                )
-                Tab(
-                    selected = selectedTab == 1,
-                    onClick = { selectedTab = 1 },
-                    text = { Text("Mis Pedidos") },
-                    icon = { Icon(Icons.Filled.ShoppingCart, null) }
-                )
-            }
-
-            // CONTENIDO
-            when (selectedTab) {
-                0 -> MedicationsListTab(medications, vm)
-                1 -> OrdersHistoryTab(orders)
+            getCurrentLocation(fusedLocationClient, context) { location ->
+                vm.updateUserLocation(location)
             }
         }
     }
 
-    // DIÁLOGO PARA CREAR NUEVO PEDIDO
-    if (showNewOrderDialog) {
-        NewOrderDialog(
-            medications = medications,
-            vm = vm,
-            onDismiss = { showNewOrderDialog = false },
-            onConfirm = { selectedMeds, deliveryType, address, notes ->
+    LaunchedEffect(Unit) {
+        if (ActivityCompat.checkSelfPermission(
+                context,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            locationPermissionLauncher.launch(
+                arrayOf(
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+                )
+            )
+        } else {
+            getCurrentLocation(fusedLocationClient, context) { location ->
+                vm.updateUserLocation(location)
+            }
+        }
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    Text(
+                        if (selectedPharmacy != null) selectedPharmacy!!.name
+                        else "Gestión de Pedidos",
+                        fontWeight = FontWeight.Bold
+                    )
+                },
+                navigationIcon = {
+                    IconButton(onClick = {
+                        if (selectedPharmacy != null) {
+                            vm.deselectPharmacy()
+                        } else {
+                            finish()
+                        }
+                    }) {
+                        Icon(Icons.Filled.ArrowBack, "Volver")
+                    }
+                },
+                actions = {
+                    if (selectedPharmacy != null) {
+                        if (cart.getTotalItems() > 0) {
+                            BadgedBox(
+                                badge = {
+                                    Badge(
+                                        containerColor = Color(0xFFFF5252)
+                                    ) {
+                                        Text(
+                                            "${cart.getTotalItems()}",
+                                            style = MaterialTheme.typography.labelSmall
+                                        )
+                                    }
+                                }
+                            ) {
+                                IconButton(onClick = { showCartSheet = true }) {
+                                    Icon(
+                                        Icons.Filled.ShoppingCart,
+                                        "Ver carrito",
+                                        tint = CustomBlue2
+                                    )
+                                }
+                            }
+                        } else {
+                            IconButton(onClick = { }) {
+                                Icon(
+                                    Icons.Filled.ShoppingCart,
+                                    "Carrito vacío",
+                                    tint = Color.Gray.copy(alpha = 0.3f)
+                                )
+                            }
+                        }
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = CustomBlue1
+                )
+            )
+        }
+    ) { padding ->
+        when {
+            selectedPharmacy != null -> {
+                Box(modifier = Modifier.padding(padding)) {
+                    PharmacyInventoryView(
+                        pharmacy = selectedPharmacy!!,
+                        inventory = pharmacyInventory,
+                        cart = cart,
+                        uiState = uiState,
+                        onAddToCart = { medication, quantity ->
+                            vm.addToCart(medication, quantity)
+                            Toast.makeText(
+                                context,
+                                "✅ ${medication.nombre} agregado al carrito",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        },
+                        modifier = Modifier.fillMaxSize()
+                    )
+
+                    if (cart.getTotalItems() > 0) {
+                        FloatingActionButton(
+                            onClick = { showCartSheet = true },
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .padding(16.dp),
+                            containerColor = CustomBlue2
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 16.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(Icons.Filled.ShoppingCart, "Ver carrito", tint = Color.White)
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    "Ver Carrito (${cart.getTotalItems()})",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = Color.White
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            else -> {
+                Column(modifier = Modifier.padding(padding)) {
+                    TabRow(
+                        selectedTabIndex = selectedTab,
+                        containerColor = CustomBlue3
+                    ) {
+                        Tab(
+                            selected = selectedTab == 0,
+                            onClick = { selectedTab = 0 },
+                            text = { Text("Farmacias", color = Color.Black) },
+                            icon = {Icon(Icons.Filled.LocalPharmacy, null, tint = Color.Black)},
+
+                            )
+                        Tab(
+                            selected = selectedTab == 1,
+                            onClick = { selectedTab = 1 },
+                            text = { Text("Mis Pedidos", color = Color.Black) },
+                            icon = { Icon(Icons.Filled.ShoppingCart, null, tint = Color.Black) },
+                        )
+                    }
+
+                    when (selectedTab) {
+                        0 -> PharmaciesListTab(
+                            pharmacies = nearbyPharmacies,
+                            uiState = uiState,
+                            onSelectPharmacy = { vm.selectPharmacy(it.pharmacy) }
+                        )
+                        1 -> OrdersHistoryTab(
+                            orders = userOrders,
+                            onCancelOrder = { orderId ->
+                                vm.cancelOrder(
+                                    orderId = orderId,
+                                    onSuccess = {
+                                        Toast.makeText(
+                                            context,
+                                            "✅ Pedido cancelado exitosamente",
+                                            Toast.LENGTH_SHORT
+                                        ).show()
+                                    },
+                                    onError = { error ->
+                                        Toast.makeText(
+                                            context,
+                                            "❌ Error: $error",
+                                            Toast.LENGTH_LONG
+                                        ).show()
+                                    }
+                                )
+                            },
+                            onTrackOrder = { order ->
+                                Toast.makeText(
+                                    context,
+                                    "🚚 Rastreando pedido #${order.id.take(8)}",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    if (showCartSheet) {
+        CartBottomSheet(
+            cart = cart,
+            pharmacy = selectedPharmacy!!,
+            onDismiss = { showCartSheet = false },
+            onUpdateQuantity = { medicationId, newQuantity ->
+                vm.updateCartItemQuantity(medicationId, newQuantity)
+            },
+            onRemoveItem = { medicationId ->
+                vm.removeFromCart(medicationId)
+                Toast.makeText(context, "Item eliminado del carrito", Toast.LENGTH_SHORT).show()
+            },
+            onCheckout = {
+                showCartSheet = false
+                showCheckoutDialog = true
+            }
+        )
+    }
+
+    if (showCheckoutDialog) {
+        CheckoutDialog(
+            cart = cart,
+            pharmacy = selectedPharmacy!!,
+            detectedAddress = detectedAddress,
+            onDismiss = { showCheckoutDialog = false },
+            onConfirm = { deliveryType, address, phone, notes ->
                 vm.createOrder(
-                    selectedMeds = selectedMeds,
                     deliveryType = deliveryType,
-                    address = address,
+                    deliveryAddress = address,
+                    phoneNumber = phone,
                     notes = notes,
-                    onSuccess = {
-                        showNewOrderDialog = false
-                        Toast.makeText(ctx, "✅ Pedido creado exitosamente", Toast.LENGTH_SHORT).show()
+                    onSuccess = { orderId ->
+                        showCheckoutDialog = false
+                        Toast.makeText(
+                            context,
+                            "✅ Pedido creado exitosamente",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                        vm.deselectPharmacy()
                     },
                     onError = { error ->
-                        Toast.makeText(ctx, "❌ Error: $error", Toast.LENGTH_LONG).show()
+                        Toast.makeText(context, "❌ Error: $error", Toast.LENGTH_LONG).show()
                     }
                 )
             }
@@ -921,65 +704,415 @@ fun OrdersManagementScreen(vm: OrdersViewModel, finish: () -> Unit) {
     }
 }
 
-@Composable
-fun MedicationsListTab(
-    medications: List<MedicationEntity>,
-    vm: OrdersViewModel
+@SuppressLint("MissingPermission")
+fun getCurrentLocation(
+    fusedLocationClient: FusedLocationProviderClient,
+    context: Context,
+    onLocation: (Location) -> Unit
 ) {
-    if (medications.isEmpty()) {
-        Box(
-            modifier = Modifier.fillMaxSize(),
-            contentAlignment = Alignment.Center
-        ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Icon(
-                    Icons.Filled.MedicalServices,
-                    null,
-                    modifier = Modifier.size(64.dp),
-                    tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
-                )
-                Spacer(Modifier.height(16.dp))
-                Text(
-                    "No hay medicamentos registrados",
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                )
+    try {
+        val cancellationToken = CancellationTokenSource()
+        fusedLocationClient.getCurrentLocation(
+            Priority.PRIORITY_HIGH_ACCURACY,
+            cancellationToken.token
+        ).addOnSuccessListener { location ->
+            if (location != null) {
+                Log.d(TAG, "📍 Ubicación obtenida: ${location.latitude}, ${location.longitude}")
+                onLocation(location)
             }
         }
-    } else {
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+    } catch (e: Exception) {
+        Log.e(TAG, "❌ Error en getCurrentLocation", e)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CART BOTTOM SHEET
+// ═══════════════════════════════════════════════════════════════════════════
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun CartBottomSheet(
+    cart: ShoppingCart,
+    pharmacy: PhysicalPoint,
+    onDismiss: () -> Unit,
+    onUpdateQuantity: (String, Int) -> Unit,
+    onRemoveItem: (String) -> Unit,
+    onCheckout: () -> Unit
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
         ) {
-            items(medications) { med ->
-                MedicationCard(
-                    medication = med,
-                    isSelected = vm.selectedMedications.contains(med),
-                    onToggleSelection = { vm.toggleMedicationSelection(med) }
-                )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text(
+                        "Mi Carrito",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        "${cart.getTotalItems()} items",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = Color.Gray
+                    )
+                }
+                IconButton(onClick = onDismiss) {
+                    Icon(Icons.Filled.Close, "Cerrar")
+                }
+            }
+
+            Spacer(Modifier.height(8.dp))
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = CustomBlue1)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Filled.LocalPharmacy, null, tint = CustomBlue2)
+                    Spacer(Modifier.width(12.dp))
+                    Column {
+                        Text(
+                            pharmacy.name,
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            pharmacy.address,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.Gray
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+
+            if (cart.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(200.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            Icons.Filled.ShoppingCart,
+                            null,
+                            modifier = Modifier.size(64.dp),
+                            tint = CustomBlue1.copy(alpha = 0.5f)
+                        )
+                        Spacer(Modifier.height(16.dp))
+                        Text(
+                            "Tu carrito está vacío",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = Color.Gray
+                        )
+                    }
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    items(cart.items) { item ->
+                        CartItemCard(
+                            item = item,
+                            onUpdateQuantity = { newQuantity ->
+                                onUpdateQuantity(item.medicationId, newQuantity)
+                            },
+                            onRemove = { onRemoveItem(item.medicationId) }
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(16.dp))
+
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFF5F5F5))
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                "Subtotal (${cart.getTotalItems()} items):",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            Text(
+                                "$${cart.calculateTotal()}",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                "TOTAL:",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                "$${cart.calculateTotal()}",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = CustomBlue2
+                            )
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(16.dp))
+
+                Button(
+                    onClick = onCheckout,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(56.dp),
+                    enabled = cart.getTotalItems() > 0,
+                    colors = ButtonDefaults.buttonColors(containerColor = CustomBlue2)
+                ) {
+                    Icon(Icons.Filled.ShoppingCart, null, tint = Color.White)
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "Proceder al Checkout",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = Color.White
+                    )
+                }
+
+                Spacer(Modifier.height(16.dp))
             }
         }
     }
 }
 
 @Composable
-fun MedicationCard(
-    medication: MedicationEntity,
-    isSelected: Boolean,
-    onToggleSelection: () -> Unit
+fun CartItemCard(
+    item: CartItem,
+    onUpdateQuantity: (Int) -> Unit,
+    onRemove: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Surface(
+                modifier = Modifier.size(48.dp),
+                shape = RoundedCornerShape(8.dp),
+                color = CustomBlue3
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(Icons.Filled.MedicalServices, null, tint = CustomBlue2)
+                }
+            }
+
+            Spacer(Modifier.width(12.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    item.medicationName,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 2
+                )
+                if (item.principioActivo.isNotEmpty()) {
+                    Text(
+                        item.principioActivo,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.Gray
+                    )
+                }
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "$${item.pricePerUnit} c/u",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = CustomBlue2,
+                    fontWeight = FontWeight.SemiBold
+                )
+
+                if (item.exceedsStock()) {
+                    Text(
+                        "⚠️ Stock insuficiente (${item.stock} disponibles)",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFFFF5252)
+                    )
+                }
+            }
+
+            Spacer(Modifier.width(8.dp))
+
+            Column(
+                horizontalAlignment = Alignment.End,
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    FilledTonalIconButton(
+                        onClick = { if (item.quantity > 1) onUpdateQuantity(item.quantity - 1) },
+                        modifier = Modifier.size(32.dp),
+                        colors = IconButtonDefaults.filledTonalIconButtonColors(
+                            containerColor = CustomBlue3
+                        )
+                    ) {
+                        Icon(Icons.Filled.Remove, null, modifier = Modifier.size(16.dp))
+                    }
+
+                    Text(
+                        "${item.quantity}",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.width(32.dp),
+                        textAlign = TextAlign.Center
+                    )
+
+                    FilledTonalIconButton(
+                        onClick = { if (item.quantity < item.stock) onUpdateQuantity(item.quantity + 1) },
+                        modifier = Modifier.size(32.dp),
+                        enabled = item.quantity < item.stock,
+                        colors = IconButtonDefaults.filledTonalIconButtonColors(
+                            containerColor = CustomBlue3
+                        )
+                    ) {
+                        Icon(Icons.Filled.Add, null, modifier = Modifier.size(16.dp))
+                    }
+                }
+
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        "$${item.getSubtotal()}",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = CustomBlue2
+                    )
+
+                    IconButton(
+                        onClick = onRemove,
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Icon(
+                            Icons.Filled.Delete,
+                            "Eliminar",
+                            tint = Color(0xFFFF5252),
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PHARMACY LIST
+// ═══════════════════════════════════════════════════════════════════════════
+
+@Composable
+fun PharmaciesListTab(
+    pharmacies: List<PharmacyWithDistance>,
+    uiState: OrderUiState,
+    onSelectPharmacy: (PharmacyWithDistance) -> Unit
+) {
+    when (uiState) {
+        is OrderUiState.Loading -> {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(color = CustomBlue2)
+            }
+        }
+        is OrderUiState.Error -> {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        Icons.Filled.Error,
+                        null,
+                        modifier = Modifier.size(64.dp),
+                        tint = Color(0xFFFF5252)
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    Text("Error: ${uiState.message}", color = Color(0xFFFF5252))
+                }
+            }
+        }
+        else -> {
+            if (pharmacies.isEmpty()) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            Icons.Filled.LocalPharmacy,
+                            null,
+                            modifier = Modifier.size(64.dp),
+                            tint = CustomBlue1.copy(alpha = 0.5f)
+                        )
+                        Spacer(Modifier.height(16.dp))
+                        Text(
+                            "No hay farmacias disponibles",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = Color.Gray
+                        )
+                    }
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    items(pharmacies) { pharmacyWithDistance ->
+                        PharmacyCard(
+                            pharmacyWithDistance = pharmacyWithDistance,
+                            onClick = { onSelectPharmacy(pharmacyWithDistance) }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun PharmacyCard(
+    pharmacyWithDistance: PharmacyWithDistance,
+    onClick: () -> Unit
 ) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onToggleSelection),
+            .clickable(onClick = onClick),
         shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = if (isSelected)
-                MaterialTheme.colorScheme.primaryContainer
-            else
-                MaterialTheme.colorScheme.surface
-        ),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
         Row(
@@ -988,49 +1121,449 @@ fun MedicationCard(
                 .padding(16.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Checkbox(
-                checked = isSelected,
-                onCheckedChange = { onToggleSelection() }
-            )
+            Icon(Icons.Filled.LocalPharmacy, null, modifier = Modifier.size(48.dp), tint = CustomBlue2)
 
-            Spacer(Modifier.width(12.dp))
+            Spacer(Modifier.width(16.dp))
 
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    medication.name,
+                Text(pharmacyWithDistance.pharmacy.name,
                     style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold
+                    fontWeight = FontWeight.Bold,
+                    color = Color.Black
                 )
                 Spacer(Modifier.height(4.dp))
-                Text(
-                    "Dosis: ${medication.doseMg}mg • Cada ${medication.frequencyHours}h",
+                Text(pharmacyWithDistance.pharmacy.address,
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                    color = Color.Black
                 )
-                Text(
-                    "Stock: ${medication.stockQuantity} unidades",
+                if (pharmacyWithDistance.pharmacy.phone.isNotEmpty()) {
+                    Text("📞 ${pharmacyWithDistance.pharmacy.phone}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.Black
+                    )
+                }
+                Text("🕐 ${pharmacyWithDistance.pharmacy.openingHours}",
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (medication.stockQuantity < 10)
-                        MaterialTheme.colorScheme.error
-                    else
-                        MaterialTheme.colorScheme.primary
+                    color = Color.Black
                 )
             }
 
-            Icon(
-                Icons.Filled.MedicalServices,
-                null,
-                tint = if (isSelected)
-                    MaterialTheme.colorScheme.primary
-                else
-                    MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f)
-            )
+            Column(horizontalAlignment = Alignment.End) {
+                if (pharmacyWithDistance.distanceKm != null) {
+                    Surface(shape = RoundedCornerShape(8.dp), color = CustomBlue3) {
+                        Text(
+                            pharmacyWithDistance.getDistanceText(),
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = Color.Black,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                Icon(Icons.Filled.ChevronRight, null, tint = Color.Black.copy(alpha = 0.3f))
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PHARMACY INVENTORY VIEW
+// ═══════════════════════════════════════════════════════════════════════════
+
+@Composable
+fun PharmacyInventoryView(
+    pharmacy: PhysicalPoint,
+    inventory: List<InventoryMedication>,
+    cart: ShoppingCart,
+    uiState: OrderUiState,
+    onAddToCart: (InventoryMedication, Int) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    when (uiState) {
+        is OrderUiState.Loading -> {
+            Box(modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(color = CustomBlue2)
+            }
+        }
+        is OrderUiState.Error -> {
+            Box(modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        Icons.Filled.Error,
+                        null,
+                        modifier = Modifier.size(64.dp),
+                        tint = Color(0xFFFF5252)
+                    )
+                    Spacer(Modifier.height(16.dp))
+                    Text("Error: ${uiState.message}", color = Color(0xFFFF5252))
+                }
+            }
+        }
+        else -> {
+            if (inventory.isEmpty()) {
+                Box(modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            Icons.Filled.MedicalServices,
+                            null,
+                            modifier = Modifier.size(64.dp),
+                            tint = CustomBlue1.copy(alpha = 0.5f)
+                        )
+                        Spacer(Modifier.height(16.dp))
+                        Text(
+                            "No hay medicamentos en inventario",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = Color.Gray
+                        )
+                    }
+                }
+            } else {
+                LazyColumn(
+                    modifier = modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    item {
+                        PharmacyInfoHeader(pharmacy)
+                    }
+
+                    items(inventory) { medication ->
+                        MedicationInventoryCard(
+                            medication = medication,
+                            onAddToCart = onAddToCart
+                        )
+                    }
+                }
+            }
         }
     }
 }
 
 @Composable
-fun OrdersHistoryTab(orders: List<OrderEntity>) {
+fun PharmacyInfoHeader(pharmacy: PhysicalPoint) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = CustomBlue3)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                "Información de la Farmacia",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(Modifier.height(8.dp))
+            Text("📍 ${pharmacy.address}", style = MaterialTheme.typography.bodySmall)
+            Text("📞 ${pharmacy.phone}", style = MaterialTheme.typography.bodySmall)
+            Text("🕐 ${pharmacy.openingHours}", style = MaterialTheme.typography.bodySmall)
+        }
+    }
+}
+
+@Composable
+fun MedicationInventoryCard(
+    medication: InventoryMedication,
+    onAddToCart: (InventoryMedication, Int) -> Unit
+) {
+    var quantity by remember { mutableStateOf(1) }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.Top
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(medication.nombre,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.Black
+                    )
+                    if (medication.principioActivo.isNotEmpty()) {
+                        Text(medication.principioActivo,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.Black
+                        )
+                    }
+                }
+
+                Surface(shape = RoundedCornerShape(8.dp), color = CustomBlue3) {
+                    Text(
+                        "$${medication.precioUnidad}",
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                        style = MaterialTheme.typography.titleMedium,
+                        color = Color.Black,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+            if (medication.descripcion.isNotEmpty()) {
+                Text(medication.descripcion,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.Black
+                )
+                Spacer(Modifier.height(8.dp))
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    "Stock: ${medication.stock} unidades",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (medication.stock < 10) Color(0xFFFF5252) else Color.Black,
+                    fontWeight = FontWeight.SemiBold
+                )
+                if (medication.presentacion.isNotEmpty()) {
+                    Text(medication.presentacion,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.Black
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(12.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    FilledTonalIconButton(
+                        onClick = { if (quantity > 1) quantity-- },
+                        modifier = Modifier.size(36.dp),
+                        colors = IconButtonDefaults.filledTonalIconButtonColors(containerColor = CustomBlue3)
+                    ) { Icon(Icons.Filled.Remove, null, modifier = Modifier.size(20.dp)) }
+
+                    Text("$quantity",
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.Black
+                    )
+
+                    FilledTonalIconButton(
+                        onClick = { if (quantity < medication.stock) quantity++ },
+                        modifier = Modifier.size(36.dp),
+                        enabled = quantity < medication.stock,
+                        colors = IconButtonDefaults.filledTonalIconButtonColors(containerColor = CustomBlue3)
+                    ) { Icon(Icons.Filled.Add, null, modifier = Modifier.size(20.dp)) }
+                }
+
+                Button(
+                    onClick = { onAddToCart(medication, quantity) },
+                    enabled = medication.stock > 0,
+                    colors = ButtonDefaults.buttonColors(containerColor = CustomBlue2)
+                ) {
+                    Icon(Icons.Filled.ShoppingCart, null, modifier = Modifier.size(18.dp), tint = Color.White)
+                    Spacer(Modifier.width(4.dp))
+                    Text("Agregar", color = Color.White)
+                }
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CHECKOUT DIALOG
+// ═══════════════════════════════════════════════════════════════════════════
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun CheckoutDialog(
+    cart: ShoppingCart,
+    pharmacy: PhysicalPoint,
+    detectedAddress: String,
+    onDismiss: () -> Unit,
+    onConfirm: (DeliveryType, String, String, String) -> Unit
+) {
+    var selectedDeliveryType by remember { mutableStateOf(DeliveryType.HOME_DELIVERY) }
+    var address by remember { mutableStateOf(detectedAddress) }
+    var phoneNumber by remember { mutableStateOf("") }
+    var notes by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Confirmar Pedido") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Card(colors = CardDefaults.cardColors(containerColor = CustomBlue3)) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(
+                            "Resumen del Pedido",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        cart.items.forEach { item ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    "${item.medicationName} x${item.quantity}",
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                                Text(
+                                    "$${item.getSubtotal()}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                "TOTAL:",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                "$${cart.calculateTotal()}",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = CustomBlue2
+                            )
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(16.dp))
+
+                Text(
+                    "Tipo de entrega:",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold
+                )
+
+                Spacer(Modifier.height(8.dp))
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { selectedDeliveryType = DeliveryType.HOME_DELIVERY },
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    RadioButton(
+                        selected = selectedDeliveryType == DeliveryType.HOME_DELIVERY,
+                        onClick = { selectedDeliveryType = DeliveryType.HOME_DELIVERY },
+                        colors = RadioButtonDefaults.colors(selectedColor = CustomBlue2)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text("🚚 Entrega a domicilio")
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { selectedDeliveryType = DeliveryType.IN_PERSON_PICKUP },
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    RadioButton(
+                        selected = selectedDeliveryType == DeliveryType.IN_PERSON_PICKUP,
+                        onClick = { selectedDeliveryType = DeliveryType.IN_PERSON_PICKUP },
+                        colors = RadioButtonDefaults.colors(selectedColor = CustomBlue2)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text("🏪 Recoger en farmacia")
+                }
+
+                if (selectedDeliveryType == DeliveryType.HOME_DELIVERY) {
+                    Spacer(Modifier.height(16.dp))
+
+                    OutlinedTextField(
+                        value = address,
+                        onValueChange = { address = it },
+                        label = { Text("Dirección de entrega") },
+                        modifier = Modifier.fillMaxWidth(),
+                        leadingIcon = { Icon(Icons.Filled.Home, null) },
+                        supportingText = {
+                            if (detectedAddress.isNotEmpty()) {
+                                Text("📍 Dirección detectada por GPS")
+                            }
+                        },
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = CustomBlue2,
+                            focusedLabelColor = CustomBlue2
+                        )
+                    )
+                }
+
+                Spacer(Modifier.height(8.dp))
+
+                OutlinedTextField(
+                    value = phoneNumber,
+                    onValueChange = { phoneNumber = it },
+                    label = { Text("Teléfono de contacto") },
+                    modifier = Modifier.fillMaxWidth(),
+                    leadingIcon = { Icon(Icons.Filled.Phone, null) },
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = CustomBlue2,
+                        focusedLabelColor = CustomBlue2
+                    )
+                )
+
+                Spacer(Modifier.height(8.dp))
+
+                OutlinedTextField(
+                    value = notes,
+                    onValueChange = { notes = it },
+                    label = { Text("Notas adicionales (opcional)") },
+                    modifier = Modifier.fillMaxWidth(),
+                    maxLines = 3,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = CustomBlue2,
+                        focusedLabelColor = CustomBlue2
+                    )
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onConfirm(selectedDeliveryType, address, phoneNumber, notes) },
+                enabled = (selectedDeliveryType == DeliveryType.IN_PERSON_PICKUP ||
+                        (selectedDeliveryType == DeliveryType.HOME_DELIVERY && address.isNotBlank())) &&
+                        phoneNumber.isNotBlank(),
+                colors = ButtonDefaults.buttonColors(containerColor = CustomBlue2)
+            ) {
+                Text("Confirmar Pedido", color = Color.White)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancelar", color = CustomBlue2)
+            }
+        }
+    )
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ORDERS HISTORY
+// ═══════════════════════════════════════════════════════════════════════════
+
+@Composable
+fun OrdersHistoryTab(
+    orders: List<MedicationOrder>,
+    onCancelOrder: (String) -> Unit,
+    onTrackOrder: (MedicationOrder) -> Unit
+) {
     if (orders.isEmpty()) {
         Box(
             modifier = Modifier.fillMaxSize(),
@@ -1041,13 +1574,13 @@ fun OrdersHistoryTab(orders: List<OrderEntity>) {
                     Icons.Filled.ShoppingCart,
                     null,
                     modifier = Modifier.size(64.dp),
-                    tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+                    tint = CustomBlue1.copy(alpha = 0.5f)
                 )
                 Spacer(Modifier.height(16.dp))
                 Text(
-                    "No hay pedidos registrados",
+                    "No tienes pedidos registrados",
                     style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                    color = Color.Gray
                 )
             }
         }
@@ -1058,14 +1591,22 @@ fun OrdersHistoryTab(orders: List<OrderEntity>) {
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             items(orders) { order ->
-                OrderCard(order)
+                OrderHistoryCard(
+                    order = order,
+                    onCancelOrder = onCancelOrder,
+                    onTrackOrder = onTrackOrder
+                )
             }
         }
     }
 }
 
 @Composable
-fun OrderCard(order: OrderEntity) {
+fun OrderHistoryCard(
+    order: MedicationOrder,
+    onCancelOrder: (String) -> Unit,
+    onTrackOrder: (MedicationOrder) -> Unit
+) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(12.dp),
@@ -1078,47 +1619,111 @@ fun OrderCard(order: OrderEntity) {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    "Pedido #${order.orderId}",
+                    "Pedido #${order.id.take(8)}",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
 
-                StatusBadge(order.status)
+                OrderStatusBadge(order.status)
             }
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
-            InfoRow("📅 Fecha:", SimpleDateFormat("dd/MM/yyyy HH:mm", Locale.getDefault()).format(Date(order.orderDate)))
-            InfoRow("📦 Total ítems:", "${order.totalItems}")
-            InfoRow("🚚 Entrega:", when (order.deliveryType) {
-                DeliveryType.HOME_DELIVERY -> "A domicilio"
-                DeliveryType.IN_PERSON_PICKUP -> "Recoger en farmacia"
-            })
+            Text(
+                "🏪 ${order.pharmacyName}",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "📍 ${order.pharmacyAddress}",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color.Gray
+            )
+            Spacer(Modifier.height(8.dp))
 
-            if (!order.deliveryAddress.isNullOrBlank()) {
-                InfoRow("📍 Dirección:", order.deliveryAddress)
+            Text(
+                "📅 ${order.createdAt?.toDate()?.let { SimpleDateFormat("dd/MM/yyyy HH:mm", Locale.getDefault()).format(it) }}",
+                style = MaterialTheme.typography.bodySmall
+            )
+            Text(
+                "🚚 ${if (order.deliveryType == DeliveryType.HOME_DELIVERY) "Entrega a domicilio" else "Recoger en farmacia"}",
+                style = MaterialTheme.typography.bodySmall
+            )
+            Text(
+                "💰 Total: $${order.totalAmount}",
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Bold,
+                color = CustomBlue2
+            )
+
+            Spacer(Modifier.height(8.dp))
+
+            Text(
+                "Medicamentos (${order.items.size}):",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Bold
+            )
+            order.items.take(3).forEach { item ->
+                Text(
+                    "• ${item.medicationName} x${item.quantity}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.Gray
+                )
+            }
+            if (order.items.size > 3) {
+                Text(
+                    "... y ${order.items.size - 3} más",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.Gray,
+                    fontStyle = androidx.compose.ui.text.font.FontStyle.Italic
+                )
             }
 
-            if (!order.notes.isNullOrBlank()) {
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    "Notas: ${order.notes}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                )
+            Spacer(Modifier.height(12.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                if (order.isActive()) {
+                    Button(
+                        onClick = { onTrackOrder(order) },
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(containerColor = CustomBlue2)
+                    ) {
+                        Icon(Icons.Filled.LocationOn, null, modifier = Modifier.size(18.dp), tint = Color.White)
+                        Spacer(Modifier.width(4.dp))
+                        Text("Rastrear", color = Color.White)
+                    }
+                }
+
+                if (order.canBeCancelled()) {
+                    OutlinedButton(
+                        onClick = { onCancelOrder(order.id) },
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFFF5252))
+                    ) {
+                        Icon(Icons.Filled.Cancel, null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Cancelar")
+                    }
+                }
             }
         }
     }
 }
 
 @Composable
-fun StatusBadge(status: OrderStatus) {
+fun OrderStatusBadge(status: OrderStatus) {
     val (text, color) = when (status) {
-        OrderStatus.PENDING -> "Pendiente" to MaterialTheme.colorScheme.tertiary
-        OrderStatus.CONFIRMED -> "Confirmado" to MaterialTheme.colorScheme.primary
-        OrderStatus.IN_TRANSIT -> "En camino" to MaterialTheme.colorScheme.secondary
+        OrderStatus.PENDING -> "Pendiente" to CustomBlue1
+        OrderStatus.CONFIRMED -> "Confirmado" to CustomBlue2
+        OrderStatus.IN_TRANSIT -> "En camino" to CustomBlue2
+        OrderStatus.READY_PICKUP -> "Listo" to Color(0xFF4CAF50)
         OrderStatus.DELIVERED -> "Entregado" to Color(0xFF4CAF50)
-        OrderStatus.CANCELLED -> "Cancelado" to MaterialTheme.colorScheme.error
+        OrderStatus.COMPLETED -> "Completado" to Color(0xFF4CAF50)
+        OrderStatus.CANCELLED -> "Cancelado" to Color(0xFFFF5252)
     }
 
     Surface(
@@ -1133,245 +1738,4 @@ fun StatusBadge(status: OrderStatus) {
             fontWeight = FontWeight.SemiBold
         )
     }
-}
-
-@Composable
-fun InfoRow(label: String, value: String) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp)
-    ) {
-        Text(
-            label,
-            style = MaterialTheme.typography.bodySmall,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.width(120.dp)
-        )
-        Text(
-            value,
-            style = MaterialTheme.typography.bodySmall
-        )
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun NewOrderDialog(
-    medications: List<MedicationEntity>,
-    vm: OrdersViewModel,
-    onDismiss: () -> Unit,
-    onConfirm: (List<Pair<MedicationEntity, Int>>, DeliveryType, String?, String?) -> Unit
-) {
-    val defaultDeliveryType by vm.defaultDeliveryType.collectAsState()
-    val defaultAddress by vm.defaultAddress.collectAsState()
-
-    var selectedDeliveryType by remember { mutableStateOf(defaultDeliveryType) }
-    var address by remember { mutableStateOf(defaultAddress) }
-    var notes by remember { mutableStateOf("") }
-    val quantities = remember { mutableStateMapOf<String, Int>() }
-
-    // Inicializa cantidades para medicamentos seleccionados
-    LaunchedEffect(vm.selectedMedications) {
-        vm.selectedMedications.forEach { med ->
-            if (!quantities.containsKey(med.medicationId)) {
-                quantities[med.medicationId] = 1
-            }
-        }
-    }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Nuevo Pedido") },
-        text = {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
-            ) {
-                if (vm.selectedMedications.isEmpty()) {
-                    Text(
-                        "Por favor selecciona al menos un medicamento",
-                        color = MaterialTheme.colorScheme.error
-                    )
-                } else {
-                    Text(
-                        "Medicamentos seleccionados:",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold
-                    )
-
-                    Spacer(Modifier.height(8.dp))
-
-                    vm.selectedMedications.forEach { med ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 4.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    med.name,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                                Text(
-                                    "${med.doseMg}mg",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                                )
-                            }
-
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                IconButton(
-                                    onClick = {
-                                        val current = quantities[med.medicationId] ?: 1
-                                        if (current > 1) {
-                                            quantities[med.medicationId] = current - 1
-                                        }
-                                    }
-                                ) {
-                                    Icon(Icons.Filled.Remove, null)
-                                }
-
-                                Text(
-                                    "${quantities[med.medicationId] ?: 1}",
-                                    modifier = Modifier.width(32.dp),
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    fontWeight = FontWeight.Bold
-                                )
-
-                                IconButton(
-                                    onClick = {
-                                        val current = quantities[med.medicationId] ?: 1
-                                        if (current < med.stockQuantity) {
-                                            quantities[med.medicationId] = current + 1
-                                        }
-                                    }
-                                ) {
-                                    Icon(Icons.Filled.Add, null)
-                                }
-                            }
-                        }
-                        HorizontalDivider()
-                    }
-
-                    Spacer(Modifier.height(16.dp))
-
-                    // TIPO DE ENTREGA
-                    Text(
-                        "Tipo de entrega:",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold
-                    )
-
-                    Spacer(Modifier.height(8.dp))
-
-                    Column {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { selectedDeliveryType = DeliveryType.HOME_DELIVERY },
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            RadioButton(
-                                selected = selectedDeliveryType == DeliveryType.HOME_DELIVERY,
-                                onClick = { selectedDeliveryType = DeliveryType.HOME_DELIVERY }
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            Column {
-                                Text("🚚 Entrega a domicilio", fontWeight = FontWeight.SemiBold)
-                                Text(
-                                    "Recibe tus medicamentos en casa",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                                )
-                            }
-                        }
-
-                        Spacer(Modifier.height(8.dp))
-
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { selectedDeliveryType = DeliveryType.IN_PERSON_PICKUP },
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            RadioButton(
-                                selected = selectedDeliveryType == DeliveryType.IN_PERSON_PICKUP,
-                                onClick = { selectedDeliveryType = DeliveryType.IN_PERSON_PICKUP }
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            Column {
-                                Text("🏪 Recoger en farmacia", fontWeight = FontWeight.SemiBold)
-                                Text(
-                                    "Recoge personalmente tu pedido",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                                )
-                            }
-                        }
-                    }
-
-                    // DIRECCIÓN (solo si es entrega a domicilio)
-                    if (selectedDeliveryType == DeliveryType.HOME_DELIVERY) {
-                        Spacer(Modifier.height(16.dp))
-
-                        OutlinedTextField(
-                            value = address,
-                            onValueChange = { address = it },
-                            label = { Text("Dirección de entrega") },
-                            modifier = Modifier.fillMaxWidth(),
-                            leadingIcon = { Icon(Icons.Filled.Home, null) }
-                        )
-                    }
-
-                    // NOTAS
-                    Spacer(Modifier.height(16.dp))
-
-                    OutlinedTextField(
-                        value = notes,
-                        onValueChange = { notes = it },
-                        label = { Text("Notas (opcional)") },
-                        modifier = Modifier.fillMaxWidth(),
-                        maxLines = 3
-                    )
-                }
-            }
-        },
-        confirmButton = {
-            Button(
-                onClick = {
-                    if (vm.selectedMedications.isNotEmpty()) {
-                        val selectedMeds = vm.selectedMedications.map { med ->
-                            med to (quantities[med.medicationId] ?: 1)
-                        }
-
-                        val finalAddress = if (selectedDeliveryType == DeliveryType.HOME_DELIVERY && address.isNotBlank()) {
-                            address
-                        } else null
-
-                        onConfirm(
-                            selectedMeds,
-                            selectedDeliveryType,
-                            finalAddress,
-                            notes.ifBlank { null }
-                        )
-                    }
-                },
-                enabled = vm.selectedMedications.isNotEmpty() &&
-                        (selectedDeliveryType == DeliveryType.IN_PERSON_PICKUP ||
-                                (selectedDeliveryType == DeliveryType.HOME_DELIVERY && address.isNotBlank()))
-            ) {
-                Text("Confirmar Pedido")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancelar")
-            }
-        }
-    )
 }

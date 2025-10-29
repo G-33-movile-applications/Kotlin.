@@ -20,7 +20,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.mymeds.models.Medication
+import com.example.mymeds.models.InventoryMedication
 import com.example.mymeds.ui.theme.MyMedsTheme
 import com.example.mymeds.viewModels.PharmacyInventoryViewModel
 
@@ -32,9 +32,9 @@ class PharmacyInventoryActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         val pharmacyName = intent.getStringExtra("PHARMACY_NAME") ?: "Farmacia"
+        val pharmacyId = intent.getStringExtra("PHARMACY_ID") ?: return finish()
 
-        // Cargar todos los medicamentos globales
-        viewModel.loadAllMedications()
+        viewModel.loadPharmacyInventory(pharmacyId)
 
         setContent {
             MyMedsTheme {
@@ -130,22 +130,17 @@ fun PharmacyInventoryScreen(
 }
 
 @Composable
-fun MedicationCard(medication: Medication) {
+fun MedicationCard(medication: InventoryMedication) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = Color(0xFFE8E8E8)
-        ),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFFE8E8E8)),
         elevation = CardDefaults.cardElevation(4.dp)
     ) {
         Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            // Nombre del medicamento
             Text(
                 text = medication.nombre,
                 fontSize = 18.sp,
@@ -153,23 +148,31 @@ fun MedicationCard(medication: Medication) {
                 color = Color.Black
             )
 
-            // Descripción
-            if (medication.descripcion.isNotEmpty()) {
+            // Stock y precio
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
                 Text(
-                    text = medication.descripcion,
-                    fontSize = 13.sp,
-                    color = Color(0xFF2C2C2C),
-                    lineHeight = 16.sp
+                    text = "Stock: ${medication.stock}",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (medication.stock > 10) Color(0xFF4CAF50) else Color(0xFFFF5722)
+                )
+                Text(
+                    text = "$${medication.precioUnidad}",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF2196F3)
                 )
             }
 
-            // Principio activo
+            if (medication.descripcion.isNotEmpty()) {
+                Text(text = medication.descripcion, fontSize = 13.sp, color = Color(0xFF2C2C2C))
+            }
+
             if (medication.principioActivo.isNotEmpty()) {
-                Text(
-                    text = "Principio activo: ${medication.principioActivo}",
-                    fontSize = 13.sp,
-                    color = Color(0xFF3C3C3C)
-                )
+                Text(text = "Principio activo: ${medication.principioActivo}", fontSize = 13.sp)
             }
 
             // Presentación

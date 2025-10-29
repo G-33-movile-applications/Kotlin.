@@ -4,6 +4,10 @@ import com.google.firebase.firestore.GeoPoint
 import com.google.firebase.firestore.PropertyName
 
 data class PhysicalPoint(
+    @get:PropertyName("id")
+    @set:PropertyName("id")
+    var id: String = "",
+
     @get:PropertyName("nombre")
     @set:PropertyName("nombre")
     var name: String = "",

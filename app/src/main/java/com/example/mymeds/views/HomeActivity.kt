@@ -65,11 +65,12 @@ class HomeActivity : ComponentActivity() {
                         HomeScreen(
                             onMapClick = { navigateToMap() },
 
-                            // Si se está conduciendo, se bloquean estas
+                            // Bloqueadas si va conduciendo
                             onUploadPrescriptionClick = { if (!isDriving) navigateToUploadPrescription() },
                             onProfileClick = { if (!isDriving) navigateToProfile() },
                             onOrdersClick = { if (!isDriving) navigateToOrders() },
                             onPrescriptionsClick = { if (!isDriving) navigateToPrescriptions() },
+                            onAnalyticsClick = { if (!isDriving) navigateToAnalytics() },
 
                             // Siempre disponibles
                             onNotificationsClick = { showNotifications() },
@@ -107,6 +108,10 @@ class HomeActivity : ComponentActivity() {
         startActivity(Intent(this, PrescriptionsActivity::class.java))
     }
 
+    private fun navigateToAnalytics() {
+        startActivity(Intent(this, AnalyticsActivity::class.java))
+    }
+
     private fun showNotifications() {
         // TODO: Implementar lógica de notificaciones
     }
@@ -127,7 +132,8 @@ fun HomeScreen(
     onNotificationsClick: () -> Unit = {},
     onLogoutClick: () -> Unit = {},
     onOrdersClick: () -> Unit = {},
-    onPrescriptionsClick: () -> Unit = {}
+    onPrescriptionsClick: () -> Unit = {},
+    onAnalyticsClick: () -> Unit = {} // NUEVO: icono de analíticas en la barra
 ) {
     // Tabs: "Tus pedidos" / "Tus prescripciones"
     val tabs = listOf("Tus pedidos", "Tus prescripciones")
@@ -145,6 +151,14 @@ fun HomeScreen(
                     )
                 },
                 actions = {
+                    // Icono de Analíticas (arriba a la derecha)
+                    IconButton(onClick = onAnalyticsClick) {
+                        Icon(
+                            imageVector = Icons.Filled.BarChart,
+                            contentDescription = "Analíticas",
+                            tint = Color.White
+                        )
+                    }
                     IconButton(onClick = onNotificationsClick) {
                         Icon(
                             imageVector = Icons.Filled.Notifications,
@@ -266,7 +280,6 @@ fun HomeScreen(
                 onClick = onUploadPrescriptionClick
             )
             Spacer(modifier = Modifier.height(16.dp))
-            // Ya no repetimos “Gestionar pedidos” aquí: quedó arriba.
             FunctionalityCard(
                 title = "Ver tu perfil",
                 description = "Datos del usuario, preferencias y accesibilidad.",

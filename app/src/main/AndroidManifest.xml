@@ -11,11 +11,13 @@
     <!-- Permisos de ubicación (para mostrar la ubicación del usuario) -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.NFC" />
 
     <!-- Feature de Google Maps (opcional pero recomendado) -->
     <uses-feature
         android:name="android.hardware.location.gps"
         android:required="false" />
+    <uses-feature android:name="android.hardware.nfc" android:required="false" />
 
     <application
         android:allowBackup="true"
@@ -43,10 +45,20 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".views.DeliveryActivity"
+            android:exported="false"
+            android:theme="@style/Theme.MyMeds" />
+
         <!-- Pantalla de registro -->
         <activity
             android:name=".views.RegisterActivity"
             android:exported="true"
+            android:theme="@style/Theme.MyMeds" />
+        <!-- PharmacyInventory -->
+        <activity
+            android:name=".views.PharmacyInventoryActivity"
+            android:exported="false"
             android:theme="@style/Theme.MyMeds" />
 
         <!-- HomeActivity -->
@@ -72,5 +84,39 @@
             android:name=".views.ProfileActivity"
             android:exported="true"
             android:theme="@style/Theme.MyMeds" />
+
+        <!-- Subir prescripción (Home) -->
+        <activity android:name=".views.UploadPrescriptionActivity"
+            android:exported="true"
+            android:theme="@style/Theme.MyMeds"/>
+
+        <!-- NFC (usa enableReaderMode; sin filters) -->
+        <activity android:name=".views.UploadByNfcActivity"
+            android:exported="true"
+            android:theme="@style/Theme.MyMeds"/>
+        <!-- Imagen y PDF -->
+        <activity android:name=".views.UploadPrescriptionPhotoActivity"
+            android:exported="true"
+            android:theme="@style/Theme.MyMeds"/>
+        <activity android:name=".views.UploadPrescriptionPDFActivity"
+            android:exported="true"
+            android:theme="@style/Theme.MyMeds"/>
+        <activity android:name=".views.OrdersManagementActivity"
+            android:exported="true"
+            android:theme="@style/Theme.MyMeds"/>
+
+        <!-- Servicio detección conducción -->
+        <service android:name=".services.DrivingDetector"
+            android:enabled="true" />
+
+        <receiver
+            android:name=".session.KeepSignedInReceiver"
+            android:exported="false" />
+
+        <activity android:name=".views.PrescriptionsActivity" />
+        <activity android:name=".views.AnalyticsActivity" />
+
+
+
     </application>
 </manifest>

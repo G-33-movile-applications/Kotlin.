@@ -6,6 +6,7 @@ import android.nfc.NfcAdapter
 import android.nfc.Tag
 import android.nfc.tech.Ndef
 import android.nfc.tech.NdefFormatable
+import androidx.compose.foundation.layout.size
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
@@ -191,32 +192,38 @@ class NfcViewModel : ViewModel() {
         viewModelScope.launch {
             _ui.update { it.copy(isSaving = true, status = "Verificando usuario...") }
 
-            // verificar id del paciente por seguridad
+            // 1. verificar id del paciente por seguridad
             if (dataToSave.patientId != currentUserId) {
                 _ui.update { it.copy(isSaving = false, status = "Verificación fallida.") }
                 onComplete(false, "Error: La prescripción no pertenece a este usuario.")
                 return@launch
             }
 
-            _ui.update { it.copy(status = "Procesando medicamentos...") }
-
             try {
-                val medicationDocuments = mapNfcDataToHashMap(dataToSave)
+                _ui.update { it.copy(status = "Creando prescripción...") }
 
-                _ui.update { it.copy(status = "Guardando en la base de datos...") }
+                val userPrescriptionsCollection = firestore.collection("usuarios").document(currentUserId).collection("prescripcionesUsuario")
 
-                // guarda en paralelo
-                val userMedsCollection = firestore.collection("usuarios").document(currentUserId).collection("medicamentosUsuario")
+                // 2. Crear el documento de la prescripción principal
+                val prescriptionDocument = mapNfcDataToPrescriptionHashMap(dataToSave)
+                val newPrescriptionRef = userPrescriptionsCollection.add(prescriptionDocument).await()
+
+                _ui.update { it.copy(status = "Guardando medicamentos...") }
+
+                // 3. Mapear y guardar los medicamentos en la subcolección
+                val medicationDocuments = mapNfcMedsToHashMapList(dataToSave.medications, newPrescriptionRef.id, dataToSave.id, dataToSave.issuedTimestamp)
+                val medsSubCollection = newPrescriptionRef.collection("medicamentosPrescripcion")
 
                 val saveJobs = medicationDocuments.map { doc ->
                     async(Dispatchers.IO) {
-                        userMedsCollection.add(doc).await()
+                        medsSubCollection.add(doc).await()
                     }
                 }
                 saveJobs.awaitAll()
 
-                _ui.update { it.copy(isSaving = false, status = "Guardado con éxito.") }
-                onComplete(true, "✅ ${medicationDocuments.size} medicamento(s) guardado(s).")
+                _ui.update { it.copy(isSaving = false, status = "Guardado con éxito.", parsedData = null) }
+                onComplete(true, "✅ ${medicationDocuments.size} medicamento(s) guardado(s) en una nueva prescripción.")
+
             } catch (e: Exception) {
                 _ui.update { it.copy(isSaving = false, status = "Error.") }
                 onComplete(false, "❌ Error al guardar: ${e.message}")
@@ -224,16 +231,31 @@ class NfcViewModel : ViewModel() {
         }
     }
 
+    private fun mapNfcDataToPrescriptionHashMap(nfcData: NfcData): HashMap<String, Any> {
+        // This function is now updated to match the PDF upload structure exactly.
+        return hashMapOf(
+            "activa" to true,
+            "fileName" to nfcData.id,
+            "fromOCR" to false, // Explicitly false for NFC
+            "notes" to "NFC",
+            "status" to "pendiente",
+            "totalItems" to nfcData.medications.size,
+            "uploadedAt" to Timestamp.now() // The exact moment of the upload
+        )
+    }
+
     /**
-     * Converts the parsed NfcData into a list of HashMaps ready for Firestore.
-     * This function performs all necessary data transformations.
+     * Convierte la lista de medicamentos del NFC en una lista de HashMaps para Firestore.
      */
-    private suspend fun mapNfcDataToHashMap(nfcData: NfcData): List<HashMap<String, Any>> {
+    private suspend fun mapNfcMedsToHashMapList(
+        medications: List<NfcMedication>,
+        firestorePrescriptionId: String, // El ID autogenerado por Firestore para el documento principal
+        nfcPrescriptionId: String, // El ID que venía en el tag NFC
+        issuedTimestamp: String
+    ): List<HashMap<String, Any>> {
         val globalMedsCollection = firestore.collection("medicamentosGlobales")
 
-        val displayFormatter = SimpleDateFormat("dd 'de' MMMM 'de' yyyy, h:mm:ss a z", Locale("es", "ES"))
-
-        return nfcData.medications.map { nfcMed ->
+        return medications.map { nfcMed ->
             val querySnapshot = globalMedsCollection.whereEqualTo("nombre", nfcMed.drugName).limit(1).get().await()
             val medDoc = querySnapshot.documents.firstOrNull()
             val medId = medDoc?.id ?: "unknown"
@@ -243,7 +265,7 @@ class NfcViewModel : ViewModel() {
 
             val startDate = try {
                 val parser = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US)
-                parser.parse(nfcData.issuedTimestamp) ?: Date()
+                parser.parse(issuedTimestamp) ?: Date()
             } catch (e: Exception) {
                 Date()
             }
@@ -255,21 +277,19 @@ class NfcViewModel : ViewModel() {
             }
             val endDate = calendar.time
 
-            // MashMap final
+            // HashMap final para cada medicamento
             hashMapOf(
                 "medicationId" to medId,
                 "medicationRef" to medRef,
                 "name" to nfcMed.drugName,
                 "doseMg" to doseMg,
                 "frequencyHours" to frequencyHours,
-
                 "startDate" to Timestamp(startDate),
                 "endDate" to Timestamp(endDate),
-                "createdAt" to Timestamp(startDate),
-
+                "createdAt" to Timestamp(Date()), // Momento en que se guarda el registro
                 "active" to true,
-                "prescriptionId" to nfcData.id,
-                "sourceFile" to "NFC Tag"
+                "prescriptionId" to firestorePrescriptionId, // Usamos el ID de Firestore
+                "sourceFile" to "NFC Tag (ID: ${nfcPrescriptionId})"
             )
         }
     }

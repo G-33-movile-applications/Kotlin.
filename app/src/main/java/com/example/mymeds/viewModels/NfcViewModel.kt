@@ -1,47 +1,49 @@
 package com.example.mymeds.viewModels
 
+import android.app.Application
 import android.nfc.NdefMessage
 import android.nfc.NdefRecord
 import android.nfc.NfcAdapter
 import android.nfc.Tag
 import android.nfc.tech.Ndef
 import android.nfc.tech.NdefFormatable
-import androidx.compose.foundation.layout.size
-import androidx.lifecycle.ViewModel
+import android.widget.Toast
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.google.firebase.Timestamp
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FirebaseFirestore
+import com.google.gson.Gson
+import com.google.gson.annotations.SerializedName
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.tasks.await
+import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
-import java.text.SimpleDateFormat
 import java.util.Locale
-import com.google.firebase.Timestamp
-import com.google.gson.Gson
-import com.google.gson.annotations.SerializedName
 
 data class UiState(
     val supported: Boolean = false,
     val enabled: Boolean = false,
     val reading: Boolean = false,
     val status: String = "",
-    // Se mantiene el lastPayload por si se necesita debug
     val lastPayload: String? = null,
     val parsedData: NfcViewModel.NfcData? = null,
     val isSaving: Boolean = false
 )
+
 private enum class PendingAction { NONE, WRITE, WIPE }
+
 private val Ndef.isWriteProtected: Boolean
     get() = this.canMakeReadOnly() && !this.isWritable
 
-class NfcViewModel : ViewModel() {
+class NfcViewModel(private val application: Application) : AndroidViewModel(application) {
 
     data class NfcData(
         @SerializedName("rxId") val id: String,
@@ -63,6 +65,7 @@ class NfcViewModel : ViewModel() {
 
     private val _ui = MutableStateFlow(UiState())
     val ui = _ui.asStateFlow()
+
     private val firestore = FirebaseFirestore.getInstance()
     private val gson = Gson()
 
@@ -76,30 +79,6 @@ class NfcViewModel : ViewModel() {
     fun startReading() { _ui.update { it.copy(reading = true, status = "Acerque el tag…") } }
     fun stopReading() { _ui.update { it.copy(reading = false, status = "Lectura detenida") } }
 
-    fun onTagDiscovered(tag: Tag) {
-        when (pendingAction) {
-            PendingAction.WRITE -> {
-                val json = dataToWrite ?: "{}"
-                pendingAction = PendingAction.NONE
-                dataToWrite = null
-                writeToTag(tag, json) { success, msg ->
-                    _ui.update { it.copy(status = msg) }
-                }
-            }
-            PendingAction.WIPE -> {
-                pendingAction = PendingAction.NONE
-                wipeTag(tag) { success, msg ->
-                    _ui.update { it.copy(status = msg) }
-                }
-            }
-            PendingAction.NONE -> {
-                if (_ui.value.reading) {
-                    readFromTag(tag)
-                }
-            }
-        }
-    }
-
     fun prepareToWrite(json: String) {
         dataToWrite = json
         pendingAction = PendingAction.WRITE
@@ -109,6 +88,26 @@ class NfcViewModel : ViewModel() {
     fun prepareToWipe() {
         pendingAction = PendingAction.WIPE
         _ui.update { it.copy(status = "Acerque el tag para limpiar") }
+    }
+
+    fun onTagDiscovered(tag: Tag) {
+        when (pendingAction) {
+            PendingAction.WRITE -> {
+                val json = dataToWrite ?: "{}"
+                pendingAction = PendingAction.NONE
+                dataToWrite = null
+                writeToTag(tag, json) { _, msg -> _ui.update { it.copy(status = msg) } }
+            }
+            PendingAction.WIPE -> {
+                pendingAction = PendingAction.NONE
+                wipeTag(tag) { _, msg -> _ui.update { it.copy(status = msg) } }
+            }
+            PendingAction.NONE -> {
+                if (_ui.value.reading) {
+                    readFromTag(tag)
+                }
+            }
+        }
     }
 
     private fun readFromTag(tag: Tag) {
@@ -130,20 +129,27 @@ class NfcViewModel : ViewModel() {
                     null
                 }
             }.onSuccess { jsonString ->
-                val parsedObject = if (jsonString != null) {
+                val parsedObject = if (jsonString != null && jsonString != "{}") {
                     try { gson.fromJson(jsonString, NfcData::class.java) } catch (e: Exception) { null }
                 } else {
                     null
                 }
 
+                if (parsedObject == null) {
+                    launch(Dispatchers.Main) {
+                        Toast.makeText(application, "El tag NFC está vacío", Toast.LENGTH_LONG).show()
+                    }
+                }
+
                 _ui.update {
                     it.copy(
-                        status = if (parsedObject != null) "Prescripción Leída" else "Tag Vacío o Formato Inválido",
+                        status = if (parsedObject != null) "Prescripción Leída" else "El tag NFC está vacío",
                         lastPayload = jsonString,
                         parsedData = parsedObject
                     )
                 }
                 stopReading()
+
             }.onFailure { exception ->
                 _ui.update { it.copy(status = "Error: ${exception.message}") }
                 stopReading()
@@ -151,8 +157,7 @@ class NfcViewModel : ViewModel() {
         }
     }
 
-    fun writeToTag(tag: Tag, json: String, mime: String = "application/com.example.mymeds.prescription",
-                   onDone: (Boolean,String)->Unit) {
+    private fun writeToTag(tag: Tag, json: String, mime: String = "application/com.example.mymeds.prescription", onDone: (Boolean, String) -> Unit) {
         viewModelScope.launch(Dispatchers.IO) {
             runCatching {
                 val payload = json.toByteArray(Charsets.UTF_8)
@@ -176,12 +181,12 @@ class NfcViewModel : ViewModel() {
         }
     }
 
-    fun wipeTag(tag: Tag, onDone: (Boolean,String)->Unit) {
+    private fun wipeTag(tag: Tag, onDone: (Boolean, String) -> Unit) {
         writeToTag(tag, "{}", onDone = onDone)
     }
 
     /**
-     * Región para guardar en firebase
+     * Guardar en Firebase
      */
     fun saveLastReadDataToFirebase(currentUserId: String, onComplete: (Boolean, String) -> Unit) {
         val dataToSave = _ui.value.parsedData ?: run {
@@ -192,7 +197,7 @@ class NfcViewModel : ViewModel() {
         viewModelScope.launch {
             _ui.update { it.copy(isSaving = true, status = "Verificando usuario...") }
 
-            // 1. verificar id del paciente por seguridad
+            // Security check: la prescripcion pertenece al user actual
             if (dataToSave.patientId != currentUserId) {
                 _ui.update { it.copy(isSaving = false, status = "Verificación fallida.") }
                 onComplete(false, "Error: La prescripción no pertenece a este usuario.")
@@ -204,20 +209,16 @@ class NfcViewModel : ViewModel() {
 
                 val userPrescriptionsCollection = firestore.collection("usuarios").document(currentUserId).collection("prescripcionesUsuario")
 
-                // 2. Crear el documento de la prescripción principal
                 val prescriptionDocument = mapNfcDataToPrescriptionHashMap(dataToSave)
                 val newPrescriptionRef = userPrescriptionsCollection.add(prescriptionDocument).await()
 
                 _ui.update { it.copy(status = "Guardando medicamentos...") }
 
-                // 3. Mapear y guardar los medicamentos en la subcolección
                 val medicationDocuments = mapNfcMedsToHashMapList(dataToSave.medications, newPrescriptionRef.id, dataToSave.id, dataToSave.issuedTimestamp)
                 val medsSubCollection = newPrescriptionRef.collection("medicamentosPrescripcion")
 
                 val saveJobs = medicationDocuments.map { doc ->
-                    async(Dispatchers.IO) {
-                        medsSubCollection.add(doc).await()
-                    }
+                    async(Dispatchers.IO) { medsSubCollection.add(doc).await() }
                 }
                 saveJobs.awaitAll()
 
@@ -232,25 +233,21 @@ class NfcViewModel : ViewModel() {
     }
 
     private fun mapNfcDataToPrescriptionHashMap(nfcData: NfcData): HashMap<String, Any> {
-        // This function is now updated to match the PDF upload structure exactly.
         return hashMapOf(
             "activa" to true,
             "fileName" to nfcData.id,
-            "fromOCR" to false, // Explicitly false for NFC
+            "fromOCR" to false,
             "notes" to "NFC",
             "status" to "pendiente",
             "totalItems" to nfcData.medications.size,
-            "uploadedAt" to Timestamp.now() // The exact moment of the upload
+            "uploadedAt" to Timestamp.now()
         )
     }
 
-    /**
-     * Convierte la lista de medicamentos del NFC en una lista de HashMaps para Firestore.
-     */
     private suspend fun mapNfcMedsToHashMapList(
         medications: List<NfcMedication>,
-        firestorePrescriptionId: String, // El ID autogenerado por Firestore para el documento principal
-        nfcPrescriptionId: String, // El ID que venía en el tag NFC
+        firestorePrescriptionId: String,
+        nfcPrescriptionId: String,
         issuedTimestamp: String
     ): List<HashMap<String, Any>> {
         val globalMedsCollection = firestore.collection("medicamentosGlobales")
@@ -266,18 +263,14 @@ class NfcViewModel : ViewModel() {
             val startDate = try {
                 val parser = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US)
                 parser.parse(issuedTimestamp) ?: Date()
-            } catch (e: Exception) {
-                Date()
-            }
+            } catch (e: Exception) { Date() }
 
-            // End date
             val calendar = Calendar.getInstance().apply {
                 time = startDate
                 add(Calendar.DAY_OF_YEAR, nfcMed.durationInDays)
             }
             val endDate = calendar.time
 
-            // HashMap final para cada medicamento
             hashMapOf(
                 "medicationId" to medId,
                 "medicationRef" to medRef,
@@ -286,12 +279,11 @@ class NfcViewModel : ViewModel() {
                 "frequencyHours" to frequencyHours,
                 "startDate" to Timestamp(startDate),
                 "endDate" to Timestamp(endDate),
-                "createdAt" to Timestamp(Date()), // Momento en que se guarda el registro
+                "createdAt" to Timestamp(Date()),
                 "active" to true,
-                "prescriptionId" to firestorePrescriptionId, // Usamos el ID de Firestore
-                "sourceFile" to "NFC Tag (ID: ${nfcPrescriptionId})"
+                "prescriptionId" to firestorePrescriptionId,
+                "sourceFile" to "NFC Tag (ID: $nfcPrescriptionId)"
             )
         }
     }
-
 }

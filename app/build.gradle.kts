@@ -124,6 +124,9 @@ dependencies {
     implementation(libs.androidx.room.ktx)
     ksp(libs.androidx.room.compiler)
 
+    // --- WorkManager for background jobs ---
+    implementation("androidx.work:work-runtime-ktx:2.9.0")
+
     // --- DataStore (KV) ---
     implementation("androidx.datastore:datastore-preferences:1.1.1")
 

@@ -8,6 +8,8 @@ import androidx.room.TypeConverters
 import com.example.mymeds.data.local.room.converters.Converters
 import com.example.mymeds.data.local.room.dao.GlobalMedicationDao
 import com.example.mymeds.data.local.room.dao.MedicationDao
+import com.example.mymeds.data.local.room.dao.NfcPrescriptionDao
+import com.example.mymeds.data.local.room.entitites.NfcPrescriptionEntity
 import com.example.mymeds.data.local.room.entitites.MedicationEntity
 import com.example.mymeds.models.GlobalMedication
 
@@ -18,9 +20,10 @@ import com.example.mymeds.models.GlobalMedication
 @Database(
     entities = [
         GlobalMedication::class, // GlobalMedication cache
-        MedicationEntity::class
+        MedicationEntity::class,
+        NfcPrescriptionEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
@@ -28,6 +31,7 @@ abstract class AppDatabase : RoomDatabase() {
 
     abstract fun globalMedicationDao(): GlobalMedicationDao
     abstract fun medicationDao(): MedicationDao
+    abstract fun nfcPrescriptionDao(): NfcPrescriptionDao
 
     companion object {
         // @Volatile para que la instancia esté al día

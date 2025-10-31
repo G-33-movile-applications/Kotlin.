@@ -1,15 +1,31 @@
 package com.example.mymeds.viewModels
 
 import android.app.Application
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.nfc.NdefMessage
 import android.nfc.NdefRecord
 import android.nfc.NfcAdapter
 import android.nfc.Tag
 import android.nfc.tech.Ndef
 import android.nfc.tech.NdefFormatable
+import android.util.Log
 import android.widget.Toast
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.work.BackoffPolicy
+import androidx.work.Constraints
+import androidx.work.ExistingWorkPolicy
+import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequest
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
+import androidx.work.WorkRequest
+import com.example.mymeds.data.local.room.AppDatabase
+import com.example.mymeds.data.local.room.entitites.NfcPrescriptionEntity
+import com.example.mymeds.workers.NfcFirebaseUploader
+import com.example.mymeds.workers.NfcSyncWorker
 import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
@@ -23,10 +39,12 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.TimeUnit
 
 data class UiState(
     val supported: Boolean = false,
@@ -68,6 +86,7 @@ class NfcViewModel(private val application: Application) : AndroidViewModel(appl
 
     private val firestore = FirebaseFirestore.getInstance()
     private val gson = Gson()
+    private val offlineNfcDao = AppDatabase.getDatabase(application).nfcPrescriptionDao()
 
     fun init(nfcAdapter: NfcAdapter?) {
         _ui.update { it.copy(
@@ -186,7 +205,7 @@ class NfcViewModel(private val application: Application) : AndroidViewModel(appl
     }
 
     /**
-     * Guardar en Firebase
+     * Guardar en Firebase con estrategia de conectividad eventual
      */
     fun saveLastReadDataToFirebase(currentUserId: String, onComplete: (Boolean, String) -> Unit) {
         val dataToSave = _ui.value.parsedData ?: run {
@@ -194,10 +213,64 @@ class NfcViewModel(private val application: Application) : AndroidViewModel(appl
             return
         }
 
-        viewModelScope.launch {
-            _ui.update { it.copy(isSaving = true, status = "Verificando usuario...") }
+        if (isNetworkAvailable()) {
+            Log.d("NfcViewModel", "Network is available. Saving directly to Firebase.")
+            saveToFirebase(currentUserId, dataToSave, onComplete)
+        } else {
+            Log.d("NfcViewModel", "Network is unavailable. Saving locally for later sync.")
+            viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    val nfcDataJson = gson.toJson(dataToSave)
+                    val offlinePrescription = NfcPrescriptionEntity(
+                        userId = currentUserId,
+                        nfcDataJson = nfcDataJson
+                    )
+                    offlineNfcDao.insert(offlinePrescription)
+                    scheduleSync()
 
-            // Security check: la prescripcion pertenece al user actual
+                    withContext(Dispatchers.Main) {
+                        _ui.update { it.copy(isSaving = false, status = "Guardado localmente.", parsedData = null) }
+                        onComplete(true, "✅ Guardado localmente. Se sincronizará cuando haya conexión.")
+                    }
+                } catch (e: Exception) {
+                    withContext(Dispatchers.Main) {
+                        onComplete(false, "❌ Error al guardar localmente: ${e.message}")
+                    }
+                }
+            }
+        }
+    }
+
+    private fun isNetworkAvailable(): Boolean {
+        val connectivityManager = application.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val network = connectivityManager.activeNetwork ?: return false
+        val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return false
+        return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+    }
+
+    private fun scheduleSync() {
+        val constraints = Constraints.Builder()
+            .setRequiredNetworkType(NetworkType.CONNECTED)
+            .build()
+
+        val syncRequest = OneTimeWorkRequestBuilder<NfcSyncWorker>()
+            .setConstraints(constraints)
+            .setBackoffCriteria(BackoffPolicy.LINEAR,
+                WorkRequest.MIN_BACKOFF_MILLIS, TimeUnit.MILLISECONDS)
+            .build()
+
+        WorkManager.getInstance(application).enqueueUniqueWork(
+            "nfc-sync-work",
+            ExistingWorkPolicy.KEEP,
+            syncRequest
+        )
+        Log.d("NfcViewModel", "NFC sync work scheduled.")
+    }
+
+    private fun saveToFirebase(currentUserId: String, dataToSave: NfcData, onComplete: (Boolean, String) -> Unit) {
+        viewModelScope.launch {
+            _ui.update { it.copy(isSaving = true, status = "Guardando en la nube...") }
+
             if (dataToSave.patientId != currentUserId) {
                 _ui.update { it.copy(isSaving = false, status = "Verificación fallida.") }
                 onComplete(false, "Error: La prescripción no pertenece a este usuario.")
@@ -205,29 +278,13 @@ class NfcViewModel(private val application: Application) : AndroidViewModel(appl
             }
 
             try {
-                _ui.update { it.copy(status = "Creando prescripción...") }
-
-                val userPrescriptionsCollection = firestore.collection("usuarios").document(currentUserId).collection("prescripcionesUsuario")
-
-                val prescriptionDocument = mapNfcDataToPrescriptionHashMap(dataToSave)
-                val newPrescriptionRef = userPrescriptionsCollection.add(prescriptionDocument).await()
-
-                _ui.update { it.copy(status = "Guardando medicamentos...") }
-
-                val medicationDocuments = mapNfcMedsToHashMapList(dataToSave.medications, newPrescriptionRef.id, dataToSave.id, dataToSave.issuedTimestamp)
-                val medsSubCollection = newPrescriptionRef.collection("medicamentosPrescripcion")
-
-                val saveJobs = medicationDocuments.map { doc ->
-                    async(Dispatchers.IO) { medsSubCollection.add(doc).await() }
-                }
-                saveJobs.awaitAll()
-
+                val uploader = NfcFirebaseUploader()
+                uploader.uploadPrescription(currentUserId, dataToSave)
                 _ui.update { it.copy(isSaving = false, status = "Guardado con éxito.", parsedData = null) }
-                onComplete(true, "✅ ${medicationDocuments.size} medicamento(s) guardado(s) en una nueva prescripción.")
-
+                onComplete(true, "✅ ${dataToSave.medications.size} medicamento(s) guardado(s) en una nueva prescripción.")
             } catch (e: Exception) {
                 _ui.update { it.copy(isSaving = false, status = "Error.") }
-                onComplete(false, "❌ Error al guardar: ${e.message}")
+                onComplete(false, "❌ Error al guardar en Firebase: ${e.message}")
             }
         }
     }

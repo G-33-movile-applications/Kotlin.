@@ -8,6 +8,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -17,9 +18,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -67,7 +72,7 @@ private fun AnalyticsScreen(
     var menuPeriodExpanded by remember { mutableStateOf(false) }
 
     // Tabs
-    var analyticsTab by remember { mutableStateOf(0) } // 0: Entregas/Recogidas, 1: BQT2
+    var analyticsTab by remember { mutableStateOf(0) } // 0: Entregas/Recogidas, 1: BQT2, 2: BQT4
 
     // Primer load
     LaunchedEffect(Unit) { viewModel.loadAnalytics() }
@@ -162,6 +167,7 @@ private fun AnalyticsScreen(
                         when (analyticsTab) {
                             0 -> DeliveryPickupTab(state.analytics, showDelivery, showPickup)
                             1 -> BQT2Tab(state.analytics)
+                            2 -> RefillsByDayTab(state.analytics)
                         }
                     }
                 }
@@ -209,6 +215,12 @@ private fun CompactFiltersBar(
                 selected = analyticsTab == 1,
                 onClick = { onTabChange(1) },
                 text = { Text("BQT2") },
+                icon = { Icon(Icons.Filled.Insights, null) }
+            )
+            Tab(
+                selected = analyticsTab == 2,
+                onClick = { onTabChange(2) },
+                text = { Text("Refills") },
                 icon = { Icon(Icons.Filled.Insights, null) }
             )
         }
@@ -548,6 +560,145 @@ private fun BQT2Tab(analytics: UserAnalytics) {
         // Financieras
         FinancialStatsSection(analytics)
         Spacer(Modifier.height(8.dp))
+    }
+}
+
+/* ------------------------------- TAB 2: BQT4 ------------------------------- */
+
+@Composable
+private fun RefillsByDayTab(analytics: UserAnalytics) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp)
+            .verticalScroll(rememberScrollState()),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            "Distribución de Pedidos por Día del Mes",
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.Center,
+            color = Color(0xFF2C3E50)
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "¿Qué días del mes se solicitan más refills?",
+            style = MaterialTheme.typography.bodySmall,
+            color = Color.Gray,
+            textAlign = TextAlign.Center
+        )
+        Spacer(Modifier.height(24.dp))
+
+        if (analytics.refillsByDayOfMonth.isEmpty()) {
+            Text(
+                "No se encontraron datos de pedidos para el período seleccionado.",
+                modifier = Modifier.padding(16.dp),
+                textAlign = TextAlign.Center
+            )
+        } else {
+            RefillBarChart(data = analytics.refillsByDayOfMonth)
+        }
+    }
+}
+
+// Barchart para los refills
+@Composable
+private fun RefillBarChart(data: List<Pair<Int, Int>>) {
+    val maxRefills = data.maxOfOrNull { it.second } ?: 1
+
+    var animationTrigger by remember { mutableStateOf(false) }
+    LaunchedEffect(key1 = data) {
+        animationTrigger = true
+    }
+
+    val animatedProgress = animateFloatAsState(
+        targetValue = if (animationTrigger) 1f else 0f,
+        animationSpec = tween(800),
+        label = "barAnimation"
+    ).value
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .drawBehind {
+                drawLine(
+                    color = Color.LightGray,
+                    start = Offset(40f, 0f),
+                    end = Offset(40f, size.height),
+                    strokeWidth = 2f
+                )
+            }
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(300.dp),
+            verticalAlignment = Alignment.Bottom,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            // Y-axis labels
+            Column(
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .padding(end = 4.dp),
+                verticalArrangement = Arrangement.SpaceBetween,
+                horizontalAlignment = Alignment.End
+            ) {
+                Text(maxRefills.toString(), fontSize = 10.sp, color = Color.Gray)
+                Text((maxRefills / 2).toString(), fontSize = 10.sp, color = Color.Gray)
+                Text("0", fontSize = 10.sp, color = Color.Gray)
+            }
+
+            // Horizontal scroll for the bars
+            Row(
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .weight(1f)
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.Bottom
+            ) {
+                // Spacer to align with axis line
+                Spacer(modifier = Modifier.width(4.dp))
+
+                data.forEach { (day, count) ->
+                    Column(
+                        modifier = Modifier.fillMaxHeight(), // Columna principal que ocupa toda la altura
+                        horizontalAlignment = Alignment.CenterHorizontally                    ) {
+                        Column(
+                            modifier = Modifier
+                                .weight(1f) // Ocupa el espacio restante
+                                .width(28.dp),
+                            verticalArrangement = Arrangement.Bottom
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .fillMaxHeight(fraction = (count.toFloat() / maxRefills) * animatedProgress)
+                                    .background(MaterialTheme.colorScheme.primary)
+                            )
+                        }
+                        Text(
+                            text = day.toString(),
+                            fontSize = 10.sp,
+                            modifier = Modifier.padding(top = 4.dp)
+                        )
+                    }
+                }
+
+            }
+        }
+        // X-axis label
+        Text(
+            "Día del Mes",
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp),
+            textAlign = TextAlign.Center,
+            style = MaterialTheme.typography.labelMedium,
+            color = Color.Gray
+        )
     }
 }
 

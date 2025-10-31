@@ -114,6 +114,10 @@ class OrdersManagementActivity : ComponentActivity() {
         enableEdgeToEdge()
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
 
+        val pharmacyId = intent.getStringExtra("PHARMACY_ID")
+        val pharmacyName = intent.getStringExtra("PHARMACY_NAME")
+        val fromMap = intent.getBooleanExtra("FROM_MAP", false)
+
         setContent {
             MaterialTheme(
                 colorScheme = lightColorScheme(
@@ -128,7 +132,9 @@ class OrdersManagementActivity : ComponentActivity() {
                 EnhancedOrdersManagementScreen(
                     vm = vm,
                     fusedLocationClient = fusedLocationClient,
-                    finish = { finish() }
+                    finish = { finish() },
+                    preselectedPharmacyId = pharmacyId,
+                    fromMap = fromMap
                 )
             }
         }
@@ -609,11 +615,13 @@ class EnhancedOrdersViewModelFactory(
 fun EnhancedOrdersManagementScreen(
     vm: EnhancedOrdersViewModel,
     fusedLocationClient: FusedLocationProviderClient,
-    finish: () -> Unit
+    finish: () -> Unit,
+    preselectedPharmacyId: String? = null,
+    fromMap: Boolean = false
 ) {
     val context = LocalContext.current
 
-    var selectedTab by remember { mutableStateOf(0) }
+    var selectedTab by remember { mutableStateOf(if (fromMap) 0 else 0) }
     var showCartSheet by remember { mutableStateOf(false) }
     var showCheckoutDialog by remember { mutableStateOf(false) }
 
@@ -626,6 +634,21 @@ fun EnhancedOrdersManagementScreen(
     val userOrders by vm.userOrders.collectAsState()
     val uiState by vm.uiState.collectAsState()
     val detectedAddress by vm.detectedAddress.collectAsState()
+
+
+    LaunchedEffect(preselectedPharmacyId, nearbyPharmacies) {
+        if (fromMap && preselectedPharmacyId != null && nearbyPharmacies.isNotEmpty()) {
+            val pharmacy = nearbyPharmacies.find { it.pharmacy.id == preselectedPharmacyId }
+            if (pharmacy != null) {
+
+                Toast.makeText(
+                    context,
+                    "Farmacia '${pharmacy.pharmacy.name}' seleccionada. Por favor elige una prescripción.",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
+    }
 
     val locationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -657,6 +680,8 @@ fun EnhancedOrdersManagementScreen(
             }
         }
     }
+
+
 
     Scaffold(
         topBar = {
@@ -754,6 +779,7 @@ fun EnhancedOrdersManagementScreen(
                             prescriptions = userPrescriptions,
                             pharmacies = nearbyPharmacies,
                             uiState = uiState,
+                            preselectedPharmacyId = if (fromMap) preselectedPharmacyId else null,
                             onSelectPrescription = { prescription, pharmacy ->
                                 vm.selectPrescription(prescription, pharmacy)
                             }
@@ -859,10 +885,18 @@ fun PrescriptionsListTab(
     prescriptions: List<PrescriptionWithMedications>,
     pharmacies: List<PharmacyWithDistance>,
     uiState: OrderUiState,
-    onSelectPrescription: (PrescriptionWithMedications, PhysicalPoint) -> Unit
+    onSelectPrescription: (PrescriptionWithMedications, PhysicalPoint) -> Unit,
+    preselectedPharmacyId: String? = null
 ) {
     var selectedPrescriptionForPharmacy by remember { mutableStateOf<PrescriptionWithMedications?>(null) }
     var showPharmacySelector by remember { mutableStateOf(false) }
+
+
+    val preselectedPharmacy = remember(preselectedPharmacyId, pharmacies) {
+        if (preselectedPharmacyId != null) {
+            pharmacies.find { it.pharmacy.id == preselectedPharmacyId }?.pharmacy
+        } else null
+    }
 
     when (uiState) {
         is OrderUiState.Loading -> {
@@ -894,12 +928,40 @@ fun PrescriptionsListTab(
                     contentPadding = PaddingValues(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
+                    // 🔥 Mostrar mensaje si hay farmacia preseleccionada
+                    if (preselectedPharmacy != null) {
+                        item {
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = CardDefaults.cardColors(containerColor = CustomBlue1)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(Icons.Filled.LocalPharmacy, null, tint = CustomBlue2)
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(
+                                        "Farmacia seleccionada: ${preselectedPharmacy.name}",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                        }
+                    }
+
                     items(prescriptions) { item ->
                         PrescriptionCard(
                             prescriptionWithMeds = item,
                             onClick = {
-                                selectedPrescriptionForPharmacy = item
-                                showPharmacySelector = true
+                                // 🔥 Si hay farmacia preseleccionada, ir directo
+                                if (preselectedPharmacy != null) {
+                                    onSelectPrescription(item, preselectedPharmacy)
+                                } else {
+                                    selectedPrescriptionForPharmacy = item
+                                    showPharmacySelector = true
+                                }
                             }
                         )
                     }

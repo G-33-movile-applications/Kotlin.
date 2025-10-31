@@ -60,9 +60,10 @@ class MapActivity : ComponentActivity() {
                         startActivity(intent)
                     },
                     onMakeOrder = { pharmacyName, pharmacyId ->
-                        val intent = Intent(this, DeliveryActivity::class.java).apply {
+                        val intent = Intent(this, OrdersManagementActivity::class.java).apply {
                             putExtra("PHARMACY_NAME", pharmacyName)
                             putExtra("PHARMACY_ID", pharmacyId)
+                            putExtra("FROM_MAP", true)
                         }
                         startActivity(intent)
                     }
@@ -322,7 +323,7 @@ fun MapScreen(
 }
 
 /**
- * Calcula los límites que incluyen la ubicación del usuario y las 3 farmacias más cercanas
+ * Calcula los límites que incluyen la ubicación del usuario y las 5 farmacias más cercanas
  */
 private fun calculateBounds(
     userLocation: LatLng,
@@ -333,7 +334,7 @@ private fun calculateBounds(
     // Agregar ubicación del usuario
     builder.include(userLocation)
 
-    // Agregar las 3 farmacias más cercanas
+    // Agregar las 5 farmacias más cercanas
     nearestPharmacies.forEach { (pharmacy, _) ->
         builder.include(LatLng(pharmacy.location.latitude, pharmacy.location.longitude))
     }

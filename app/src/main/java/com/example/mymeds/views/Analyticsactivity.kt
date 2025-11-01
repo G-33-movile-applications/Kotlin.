@@ -166,8 +166,8 @@ private fun AnalyticsScreen(
                     is AnalyticsUiState.Success -> {
                         when (analyticsTab) {
                             0 -> DeliveryPickupTab(state.analytics, showDelivery, showPickup)
-                            1 -> BQT2Tab(state.analytics)
-                            2 -> RefillsByDayTab(state.analytics)
+                            1 -> BQT2Tab(state.analytics)       // ← Rediseñada
+                            2 -> RefillsByDayTab(state.analytics) // ← Rediseñada
                         }
                     }
                 }
@@ -214,7 +214,7 @@ private fun CompactFiltersBar(
             Tab(
                 selected = analyticsTab == 1,
                 onClick = { onTabChange(1) },
-                text = { Text("BQT2") },
+                text = { Text("Medicamentos") },
                 icon = { Icon(Icons.Filled.Insights, null) }
             )
             Tab(
@@ -324,14 +324,11 @@ private fun DeliveryPickupTab(
             showPickup = showPickup
         )
 
-        // NUEVO: KPIs de ESTADOS (mismo formato compacto)
+        // KPIs de ESTADOS (compacto)
         StatusKpiRow(analytics)
 
-        // NUEVO: KPI de FARMACIA preferida (mismo formato compacto)
+        // KPIs de FARMACIA (compacto)
         PharmacyKpiRow(analytics)
-
-        // (Opcional) Si aún quieres conservar esta card informativa adicional:
-        // PharmacyPreferenceCard(analytics.mostFrequentPharmacy)
 
         Spacer(Modifier.height(8.dp))
     }
@@ -341,13 +338,7 @@ private fun DeliveryPickupTab(
 
 @Composable
 private fun StatusKpiRow(analytics: UserAnalytics) {
-    Text(
-        "Estados de pedidos",
-        style = MaterialTheme.typography.titleLarge,
-        fontWeight = FontWeight.Bold,
-        color = Color(0xFF2C3E50)
-    )
-    Spacer(Modifier.height(8.dp))
+    SectionTitleChip("Estados de pedidos", "✅")
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         KpiCard(
             modifier = Modifier.weight(1f),
@@ -375,13 +366,7 @@ private fun StatusKpiRow(analytics: UserAnalytics) {
 
 @Composable
 private fun PharmacyKpiRow(analytics: UserAnalytics) {
-    Text(
-        "Farmacias",
-        style = MaterialTheme.typography.titleLarge,
-        fontWeight = FontWeight.Bold,
-        color = Color(0xFF2C3E50)
-    )
-    Spacer(Modifier.height(8.dp))
+    SectionTitleChip("Farmacias", "🏪")
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         KpiCard(
             modifier = Modifier.weight(1f),
@@ -390,8 +375,6 @@ private fun PharmacyKpiRow(analytics: UserAnalytics) {
             value = analytics.mostFrequentPharmacy.ifBlank { "—" },
             color = Color(0xFF9B59B6)
         )
-        // Si luego agregas "uniquePharmacies" al modelo, puedes mostrarlo aquí.
-        // KpiCard(Modifier.weight(1f), Icons.Filled.Store, "Únicas", analytics.uniquePharmacies.toString(), Color(0xFF8E44AD))
     }
 }
 
@@ -461,6 +444,7 @@ private fun DonutDeliveryPickupCard(
     val deliveryPct = (rawDelivery / sum) * 100f
     val pickupPct   = (rawPickup   / sum) * 100f
 
+    SectionTitleChip("Distribución", "📈")
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
@@ -540,7 +524,7 @@ private fun LegendItem(label: String, pct: Int, color: Color) {
     }
 }
 
-/* ------------------------------- TAB 1: BQT2 ------------------------------- */
+/* ------------------------------- TAB 1: BQT2 (compacto) ------------------------------- */
 
 @Composable
 private fun BQT2Tab(analytics: UserAnalytics) {
@@ -550,155 +534,180 @@ private fun BQT2Tab(analytics: UserAnalytics) {
             .fillMaxSize()
             .verticalScroll(scroll)
             .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Cabecera con gradiente
-        TotalOrdersHeader(analytics.totalOrders)
-        // Métricas BQT2
-        MedicationRequestsSection(analytics)
-        LastClaimSection(analytics)
-        // Financieras
-        FinancialStatsSection(analytics)
-        Spacer(Modifier.height(8.dp))
+        SectionTitleChip("BQT2 – Resumen", "🧪")
+
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            TinyKpiCard(
+                modifier = Modifier.weight(1f),
+                icon = Icons.Filled.MedicalServices,
+                title = "Total solicitados",
+                value = analytics.totalMedicationRequests.toString(),
+                color = Color(0xFFE74C3C)
+            )
+            TinyKpiCard(
+                modifier = Modifier.weight(1f),
+                icon = Icons.Filled.Calculate,
+                title = "Prom. por pedido",
+                value = String.format("%.1f", analytics.averageMedicationsPerOrder),
+                color = Color(0xFF9B59B6)
+            )
+            TinyKpiCard(
+                modifier = Modifier.weight(1f),
+                icon = Icons.Filled.ShoppingCart,
+                title = "Total pedidos",
+                value = analytics.totalOrders.toString(),
+                color = Color(0xFF6C8CF2)
+            )
+        }
+
+        SectionTitleChip("Último reclamo", "📦")
+        val claimed = analytics.hasEverClaimed
+        val chipColor = if (claimed) Color(0xFF2ECC71) else Color(0xFFF39C12)
+        Card(
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = chipColor.copy(alpha = 0.10f)),
+            elevation = CardDefaults.cardElevation(0.dp)
+        ) {
+            Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(if (claimed) "📦" else "⏳", fontSize = 28.sp)
+                Spacer(Modifier.width(12.dp))
+                Column {
+                    if (claimed) {
+                        Text("Hace ${analytics.daysSinceLastClaim} día(s)", fontWeight = FontWeight.Bold, color = chipColor.darken(0.35f))
+                        analytics.lastClaimDate?.let {
+                            val sdf = SimpleDateFormat("dd 'de' MMMM, yyyy", Locale("es"))
+                            Text(sdf.format(it), fontSize = 12.sp, color = chipColor.darken(0.25f))
+                        }
+                    } else {
+                        Text("Nunca has reclamado", fontWeight = FontWeight.Bold, color = chipColor.darken(0.35f))
+                        Text("Aún no hay reclamos registrados", fontSize = 12.sp, color = chipColor.darken(0.25f))
+                    }
+                }
+            }
+        }
+
+        SectionTitleChip("Finanzas", "💰")
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            val fmt = NumberFormat.getCurrencyInstance(Locale("es", "CO"))
+            TinyKpiCard(
+                modifier = Modifier.weight(1f),
+                icon = Icons.Filled.AttachMoney,
+                title = "Total gastado",
+                value = fmt.format(analytics.totalSpent),
+                color = Color(0xFF16A085)
+            )
+            TinyKpiCard(
+                modifier = Modifier.weight(1f),
+                icon = Icons.Filled.TrendingUp,
+                title = "Ticket promedio",
+                value = fmt.format(analytics.averageOrderValue),
+                color = Color(0xFF27AE60)
+            )
+            TinyKpiCard(
+                modifier = Modifier.weight(1f),
+                icon = Icons.Filled.Star,
+                title = "Farmacia top",
+                value = analytics.mostFrequentPharmacy.ifBlank { "—" },
+                color = Color(0xFF9B59B6)
+            )
+        }
+
+        MiniInfoTip("💡", "Agrupa tus compras por receta para mejorar el promedio por pedido.")
     }
 }
 
-/* ------------------------------- TAB 2: BQT4 ------------------------------- */
+/* ------------------------------- TAB 2: BQT4 (compacto) ------------------------------- */
 
 @Composable
 private fun RefillsByDayTab(analytics: UserAnalytics) {
+    val scroll = rememberScrollState()
+    val data = analytics.refillsByDayOfMonth
+    val total = data.sumOf { it.second }
+    val avg = if (data.isNotEmpty()) total.toFloat() / data.size else 0f
+    val maxDay = data.maxByOrNull { it.second }
+    val minDay = data.minByOrNull { it.second }
+
+    val early = data.filter { it.first <= 10 }.sumOf { it.second }
+    val mid   = data.filter { it.first in 11..20 }.sumOf { it.second }
+    val late  = data.filter { it.first > 20 }.sumOf { it.second }
+
+    val ePct = if (total > 0) (early * 100f / total) else 0f
+    val mPct = if (total > 0) (mid   * 100f / total) else 0f
+    val lPct = if (total > 0) (late  * 100f / total) else 0f
+
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(16.dp)
-            .verticalScroll(rememberScrollState()),
-        horizontalAlignment = Alignment.CenterHorizontally
+            .verticalScroll(scroll)
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text(
-            "Distribución de Pedidos por Día del Mes",
-            style = MaterialTheme.typography.titleLarge,
-            fontWeight = FontWeight.Bold,
-            textAlign = TextAlign.Center,
-            color = Color(0xFF2C3E50)
-        )
-        Spacer(Modifier.height(4.dp))
-        Text(
-            "¿Qué días del mes se solicitan más refills?",
-            style = MaterialTheme.typography.bodySmall,
-            color = Color.Gray,
-            textAlign = TextAlign.Center
-        )
-        Spacer(Modifier.height(24.dp))
-
-        if (analytics.refillsByDayOfMonth.isEmpty()) {
-            Text(
-                "No se encontraron datos de pedidos para el período seleccionado.",
-                modifier = Modifier.padding(16.dp),
-                textAlign = TextAlign.Center
+        SectionTitleChip("Refills – Resumen", "⏱️")
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            TinyKpiCard(
+                modifier = Modifier.weight(1f),
+                icon = Icons.Filled.Insights,
+                title = "Pedidos analizados",
+                value = total.toString(),
+                color = Color(0xFF8E44AD)
             )
-        } else {
-            RefillBarChart(data = analytics.refillsByDayOfMonth)
+            TinyKpiCard(
+                modifier = Modifier.weight(1f),
+                icon = Icons.Filled.TrendingUp,
+                title = "Prom/Día",
+                value = String.format("%.1f", avg),
+                color = Color(0xFF3498DB)
+            )
+            TinyKpiCard(
+                modifier = Modifier.weight(1f),
+                icon = Icons.Filled.Star,
+                title = "Día pico",
+                value = maxDay?.first?.toString() ?: "—",
+                color = Color(0xFFE67E22)
+            )
         }
-    }
-}
 
-// Barchart para los refills
-@Composable
-private fun RefillBarChart(data: List<Pair<Int, Int>>) {
-    val maxRefills = data.maxOfOrNull { it.second } ?: 1
+        SectionTitleChip("Patrones del mes", "🗓️")
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            ProgressPillCard(
+                modifier = Modifier.weight(1f),
+                iconEmoji = "🌅",
+                title = "Inicio (1–10)",
+                percent = ePct,
+                countText = "$early pedidos",
+                color = Color(0xFF2ECC71)
+            )
+            ProgressPillCard(
+                modifier = Modifier.weight(1f),
+                iconEmoji = "☀️",
+                title = "Medio (11–20)",
+                percent = mPct,
+                countText = "$mid pedidos",
+                color = Color(0xFFF39C12)
+            )
+            ProgressPillCard(
+                modifier = Modifier.weight(1f),
+                iconEmoji = "🌙",
+                title = "Final (21–31)",
+                percent = lPct,
+                countText = "$late pedidos",
+                color = Color(0xFF3498DB)
+            )
+        }
 
-    var animationTrigger by remember { mutableStateOf(false) }
-    LaunchedEffect(key1 = data) {
-        animationTrigger = true
-    }
-
-    val animatedProgress = animateFloatAsState(
-        targetValue = if (animationTrigger) 1f else 0f,
-        animationSpec = tween(800),
-        label = "barAnimation"
-    ).value
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .drawBehind {
-                drawLine(
-                    color = Color.LightGray,
-                    start = Offset(40f, 0f),
-                    end = Offset(40f, size.height),
-                    strokeWidth = 2f
-                )
-            }
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(300.dp),
-            verticalAlignment = Alignment.Bottom,
-            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        SectionTitleChip("Distribución diaria", "📊")
+        Card(
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = Color.White),
+            elevation = CardDefaults.cardElevation(0.dp)
         ) {
-            // Y-axis labels
-            Column(
-                modifier = Modifier
-                    .fillMaxHeight()
-                    .padding(end = 4.dp),
-                verticalArrangement = Arrangement.SpaceBetween,
-                horizontalAlignment = Alignment.End
-            ) {
-                Text(maxRefills.toString(), fontSize = 10.sp, color = Color.Gray)
-                Text((maxRefills / 2).toString(), fontSize = 10.sp, color = Color.Gray)
-                Text("0", fontSize = 10.sp, color = Color.Gray)
-            }
-
-            // Horizontal scroll for the bars
-            Row(
-                modifier = Modifier
-                    .fillMaxHeight()
-                    .weight(1f)
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalAlignment = Alignment.Bottom
-            ) {
-                // Spacer to align with axis line
-                Spacer(modifier = Modifier.width(4.dp))
-
-                data.forEach { (day, count) ->
-                    Column(
-                        modifier = Modifier.fillMaxHeight(), // Columna principal que ocupa toda la altura
-                        horizontalAlignment = Alignment.CenterHorizontally                    ) {
-                        Column(
-                            modifier = Modifier
-                                .weight(1f) // Ocupa el espacio restante
-                                .width(28.dp),
-                            verticalArrangement = Arrangement.Bottom
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .fillMaxHeight(fraction = (count.toFloat() / maxRefills) * animatedProgress)
-                                    .background(MaterialTheme.colorScheme.primary)
-                            )
-                        }
-                        Text(
-                            text = day.toString(),
-                            fontSize = 10.sp,
-                            modifier = Modifier.padding(top = 4.dp)
-                        )
-                    }
-                }
-
-            }
+            RefillBarChart(data = data) // altura reducida dentro
         }
-        // X-axis label
-        Text(
-            "Día del Mes",
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 8.dp),
-            textAlign = TextAlign.Center,
-            style = MaterialTheme.typography.labelMedium,
-            color = Color.Gray
-        )
+
+        SectionTitleChip("Días con mayor actividad", "🔥")
+        DensityAnalysisSection(data)
     }
 }
 
@@ -923,4 +932,301 @@ private fun AnalyticsTheme(content: @Composable () -> Unit) {
 private fun Color.darken(factor: Float): Color {
     val f = (1f - factor).coerceIn(0f, 1f)
     return Color(red * f, green * f, blue * f, alpha)
+}
+
+/* ------------------------ NUEVOS COMPONENTES COMPACTOS ------------------------ */
+
+@Composable
+private fun TinyKpiCard(
+    modifier: Modifier = Modifier,
+    icon: ImageVector,
+    title: String,
+    value: String,
+    color: Color
+) {
+    Card(
+        modifier = modifier,
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = color.copy(alpha = 0.10f)),
+        elevation = CardDefaults.cardElevation(0.dp)
+    ) {
+        Column(Modifier.padding(12.dp)) {
+            Icon(icon, null, tint = color, modifier = Modifier.size(20.dp))
+            Spacer(Modifier.height(4.dp))
+            Text(title, color = color.darken(0.2f), fontSize = 11.sp)
+            Text(value, color = color.darken(0.35f), fontWeight = FontWeight.Bold, fontSize = 16.sp)
+        }
+    }
+}
+
+@Composable
+private fun ProgressPillCard(
+    modifier: Modifier = Modifier,
+    iconEmoji: String,
+    title: String,
+    percent: Float,    // 0..100
+    countText: String, // "12 pedidos"
+    color: Color
+) {
+    Card(
+        modifier = modifier,
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = color.copy(alpha = 0.10f)),
+        elevation = CardDefaults.cardElevation(0.dp)
+    ) {
+        Column(Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(iconEmoji, fontSize = 16.sp)
+                Spacer(Modifier.width(6.dp))
+                Text(title, color = color.darken(0.25f), fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.weight(1f))
+                Text("${percent.toInt()}%", color = color.darken(0.3f), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            }
+            Spacer(Modifier.height(8.dp))
+            LinearProgressIndicator(
+                progress = (percent / 100f).coerceIn(0f, 1f),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(8.dp)
+                    .clip(RoundedCornerShape(999.dp)),
+                color = color,
+                trackColor = color.copy(alpha = 0.18f)
+            )
+            Spacer(Modifier.height(6.dp))
+            Text(countText, color = color.darken(0.35f), fontSize = 11.sp)
+        }
+    }
+}
+
+@Composable
+private fun MiniInfoTip(emoji: String, text: String) {
+    Surface(
+        color = Color(0xFFFFF9E6),
+        shape = RoundedCornerShape(999.dp)
+    ) {
+        Row(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(emoji, fontSize = 14.sp)
+            Spacer(Modifier.width(8.dp))
+            Text(text, color = Color(0xFF7A5D00), fontSize = 12.sp)
+        }
+    }
+}
+
+@Composable
+private fun SectionTitleChip(title: String, emoji: String) {
+    Surface(
+        color = Color(0xFFEFF5FF),
+        shape = RoundedCornerShape(999.dp)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(emoji, fontSize = 14.sp)
+            Spacer(Modifier.width(6.dp))
+            Text(title, color = Color(0xFF2C3E50), fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        }
+    }
+}
+
+/* ------------------------- Charts & análisis compactos ------------------------- */
+
+// Barchart para los refills (altura reducida)
+@Composable
+private fun RefillBarChart(data: List<Pair<Int, Int>>) {
+    val maxRefills = data.maxOfOrNull { it.second } ?: 1
+
+    var animationTrigger by remember { mutableStateOf(false) }
+    LaunchedEffect(key1 = data) {
+        animationTrigger = true
+    }
+
+    val animatedProgress = animateFloatAsState(
+        targetValue = if (animationTrigger) 1f else 0f,
+        animationSpec = tween(800),
+        label = "barAnimation"
+    ).value
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp)
+            .drawBehind {
+                drawLine(
+                    color = Color.LightGray,
+                    start = Offset(40f, 0f),
+                    end = Offset(40f, size.height),
+                    strokeWidth = 2f
+                )
+            }
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(220.dp),
+            verticalAlignment = Alignment.Bottom,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            // Y-axis labels
+            Column(
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .padding(end = 4.dp),
+                verticalArrangement = Arrangement.SpaceBetween,
+                horizontalAlignment = Alignment.End
+            ) {
+                Text(maxRefills.toString(), fontSize = 10.sp, color = Color.Gray)
+                Text((maxRefills / 2).toString(), fontSize = 10.sp, color = Color.Gray)
+                Text("0", fontSize = 10.sp, color = Color.Gray)
+            }
+
+            // Horizontal scroll for the bars
+            Row(
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .weight(1f)
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.Bottom
+            ) {
+                // Spacer to align with axis line
+                Spacer(modifier = Modifier.width(4.dp))
+
+                data.forEach { (day, count) ->
+                    Column(
+                        modifier = Modifier.fillMaxHeight(),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .width(28.dp),
+                            verticalArrangement = Arrangement.Bottom
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .fillMaxHeight(fraction = (count.toFloat() / maxRefills) * animatedProgress)
+                                    .background(
+                                        Brush.verticalGradient(
+                                            listOf(
+                                                Color(0xFF9B59B6),
+                                                Color(0xFF8E44AD)
+                                            )
+                                        ),
+                                        shape = RoundedCornerShape(topStart = 4.dp, topEnd = 4.dp)
+                                    )
+                            )
+                        }
+                        Text(
+                            text = day.toString(),
+                            fontSize = 10.sp,
+                            modifier = Modifier.padding(top = 4.dp),
+                            color = Color(0xFF2C3E50)
+                        )
+                    }
+                }
+            }
+        }
+        // X-axis label
+        Text(
+            "Día del Mes",
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp),
+            textAlign = TextAlign.Center,
+            style = MaterialTheme.typography.labelMedium,
+            color = Color.Gray
+        )
+    }
+}
+
+@Composable
+private fun DensityAnalysisSection(data: List<Pair<Int, Int>>) {
+    if (data.isEmpty()) return
+
+    // Identificar días con alta actividad (por encima del promedio)
+    val avg = data.map { it.second }.average()
+    val highActivityDays = data.filter { it.second > avg }.sortedByDescending { it.second }.take(5)
+
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = Color.White),
+            elevation = CardDefaults.cardElevation(0.dp)
+        ) {
+            Column(
+                Modifier.padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                highActivityDays.forEachIndexed { index, (day, count) ->
+                    DensityDayItem(
+                        rank = index + 1,
+                        day = day,
+                        count = count,
+                        maxCount = highActivityDays.firstOrNull()?.second ?: 1
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DensityDayItem(rank: Int, day: Int, count: Int, maxCount: Int) {
+    var animationPlayed by remember { mutableStateOf(false) }
+    val animatedWidth by animateFloatAsState(
+        targetValue = if (animationPlayed) count.toFloat() / maxCount else 0f,
+        animationSpec = tween(600, delayMillis = rank * 100),
+        label = "densityAnim"
+    )
+    LaunchedEffect(Unit) { animationPlayed = true }
+
+    val medalEmoji = when (rank) {
+        1 -> "🥇"
+        2 -> "🥈"
+        3 -> "🥉"
+        else -> "🏅"
+    }
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(medalEmoji, fontSize = 20.sp, modifier = Modifier.width(28.dp))
+        Spacer(Modifier.width(8.dp))
+        Column(Modifier.weight(1f)) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("Día $day", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold, color = Color(0xFF2C3E50))
+                Text("$count pedidos", style = MaterialTheme.typography.bodySmall, color = Color(0xFF7F8C8D))
+            }
+            Spacer(Modifier.height(4.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(8.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(Color(0xFFECF0F1))
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .fillMaxWidth(animatedWidth)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(
+                            when (rank) {
+                                1 -> Color(0xFFE74C3C)
+                                2 -> Color(0xFFE67E22)
+                                3 -> Color(0xFFF39C12)
+                                else -> Color(0xFF3498DB)
+                            }
+                        )
+                )
+            }
+        }
+    }
 }

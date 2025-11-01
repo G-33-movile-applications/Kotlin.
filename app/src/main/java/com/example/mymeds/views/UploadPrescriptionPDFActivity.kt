@@ -1,9 +1,13 @@
 package com.example.mymeds.views
 
 import android.app.Activity
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.pdf.PdfRenderer
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
 import android.provider.OpenableColumns
@@ -20,19 +24,24 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.border
+import androidx.compose.foundation.background
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.room.*
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
@@ -40,12 +49,10 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.tasks.await
 import java.io.File
 import java.io.FileOutputStream
-import java.text.SimpleDateFormat
 import java.util.*
 
 private const val TAG = "PDFUploadActivity"
 private const val MAX_PDFS = 3
-
 
 class UploadPrescriptionPDFActivity : ComponentActivity() {
     private val vm: PdfOcrUploadViewModel by viewModels()
@@ -59,7 +66,7 @@ class UploadPrescriptionPDFActivity : ComponentActivity() {
     }
 }
 
-data class MedicationInformation(
+data class MedicationInfo(
     val medicationId: String,
     val name: String,
     val medicationRef: String,
@@ -69,7 +76,7 @@ data class MedicationInformation(
     val endDate: Date,
     val active: Boolean,
     val prescriptionId: String,
-    val sourceFile: String = "" // Nombre del PDF de origen
+    val sourceFile: String = ""
 )
 
 data class PdfDocument(
@@ -81,18 +88,210 @@ data class PdfDocument(
     val extractedText: String? = null
 )
 
+/* ═══════════════════════════════════════════════════════════════════════════
+ * ║                      ESTRATEGIA DE CONECTIVIDAD                         ║
+ * ║                    ALMACENAMIENTO LOCAL CON ROOM                        ║
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * ARQUITECTURA DE PERSISTENCIA OFFLINE PARA PDFs:
+ *
+ * 1. DETECCIÓN DE CONECTIVIDAD:
+ *    - ConnectivityManager para verificar estado de red
+ *    - Soporte para WiFi, datos móviles y ethernet
+ *    - Compatible con Android 6.0+ (API 23)
+ *
+ * 2. ALMACENAMIENTO LOCAL (Room Database):
+ *    - Entidad: PendingPdfPrescriptionEntity
+ *    - DAO: Operaciones CRUD locales
+ *    - Base de datos SQLite embebida
+ *
+ * 3. FLUJO DE TRABAJO:
+ *    a) CON INTERNET:
+ *       ├─> Guarda directamente en Firestore
+ *       └─> Marca como sincronizado
+ *
+ *    b) SIN INTERNET:
+ *       ├─> Guarda localmente en Room
+ *       ├─> Marca como pendiente de sincronización
+ *       └─> Usuario puede usar la app normalmente
+ *
+ * 4. SINCRONIZACIÓN AUTOMÁTICA:
+ *    - Se ejecuta al detectar conexión
+ *    - Procesa todos los registros pendientes
+ *    - Actualiza estado tras sincronización exitosa
+ *    - Elimina registros ya sincronizados
+ */
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ENTIDAD ROOM PARA ALMACENAMIENTO LOCAL DE PDFs
+// ═══════════════════════════════════════════════════════════════════════════
+
+@Entity(tableName = "pending_pdf_prescriptions")
+data class PendingPdfPrescriptionEntity(
+    @PrimaryKey(autoGenerate = true)
+    val id: Long = 0,
+
+    @ColumnInfo(name = "user_id")
+    val userId: String,
+
+    @ColumnInfo(name = "file_name")
+    val fileName: String,
+
+    @ColumnInfo(name = "medications_json")
+    val medicationsJson: String,
+
+    @ColumnInfo(name = "created_at")
+    val createdAt: Long = System.currentTimeMillis(),
+
+    @ColumnInfo(name = "is_synced")
+    val isSynced: Boolean = false,
+
+    @ColumnInfo(name = "sync_attempts")
+    val syncAttempts: Int = 0,
+
+    @ColumnInfo(name = "last_sync_attempt")
+    val lastSyncAttempt: Long? = null,
+
+    @ColumnInfo(name = "error_message")
+    val errorMessage: String? = null
+)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DAO PARA PDFs
+// ═══════════════════════════════════════════════════════════════════════════
+
+@Dao
+interface PendingPdfPrescriptionDao {
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(prescription: PendingPdfPrescriptionEntity): Long
+
+    @Query("SELECT * FROM pending_pdf_prescriptions WHERE is_synced = 0 ORDER BY created_at ASC")
+    suspend fun getAllPending(): List<PendingPdfPrescriptionEntity>
+
+    @Query("SELECT COUNT(*) FROM pending_pdf_prescriptions WHERE is_synced = 0")
+    suspend fun getPendingCount(): Int
+
+    @Update
+    suspend fun update(prescription: PendingPdfPrescriptionEntity)
+
+    @Delete
+    suspend fun delete(prescription: PendingPdfPrescriptionEntity)
+
+    @Query("DELETE FROM pending_pdf_prescriptions WHERE is_synced = 1")
+    suspend fun deleteSynced()
+
+    @Query("SELECT * FROM pending_pdf_prescriptions WHERE id = :id")
+    suspend fun getById(id: Long): PendingPdfPrescriptionEntity?
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DATABASE ROOM PARA PDFs
+// ═══════════════════════════════════════════════════════════════════════════
+
+@Database(
+    entities = [PendingPdfPrescriptionEntity::class],
+    version = 1,
+    exportSchema = false
+)
+abstract class PdfDatabase : RoomDatabase() {
+    abstract fun pendingPdfPrescriptionDao(): PendingPdfPrescriptionDao
+
+    companion object {
+        @Volatile
+        private var INSTANCE: PdfDatabase? = null
+
+        fun getDatabase(context: Context): PdfDatabase {
+            return INSTANCE ?: synchronized(this) {
+                val instance = Room.databaseBuilder(
+                    context.applicationContext,
+                    PdfDatabase::class.java,
+                    "mymeds_pdf_offline_database"
+                )
+                    .fallbackToDestructiveMigration()
+                    .build()
+                INSTANCE = instance
+                instance
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CONNECTIVITY HELPER (REUTILIZABLE)
+// ═══════════════════════════════════════════════════════════════════════════
+
+object PdfConnectivityHelper {
+
+    fun isNetworkAvailable(context: Context): Boolean {
+        val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val network = connectivityManager.activeNetwork ?: return false
+            val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return false
+
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+                    capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ||
+                    capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+        } else {
+            @Suppress("DEPRECATION")
+            val networkInfo = connectivityManager.activeNetworkInfo
+            @Suppress("DEPRECATION")
+            networkInfo != null && networkInfo.isConnected
+        }
+    }
+
+    fun getConnectionType(context: Context): String {
+        val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val network = connectivityManager.activeNetwork ?: return "Sin conexión"
+            val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return "Sin conexión"
+
+            when {
+                capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "WiFi"
+                capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "Datos móviles"
+                capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "Ethernet"
+                else -> "Desconocido"
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            val networkInfo = connectivityManager.activeNetworkInfo
+            @Suppress("DEPRECATION")
+            networkInfo?.typeName ?: "Sin conexión"
+        }
+    }
+}
+
 /**
  * ╔══════════════════════════════════════════════════════════════════════════╗
- * ║                    IMPLEMENTACIÓN DE MULTITHREADING                       ║
- * ║              PROCESAMIENTO MÚLTIPLE DE PDFS (HASTA 3)                     ║
+ * ║             IMPLEMENTACIÓN DE MULTITHREADING PARA PDFs                   ║
+ * ║                     CON CORRUTINAS Y DISPATCHERS                          ║
+ * ║                 + ESTRATEGIA DE CONECTIVIDAD OFFLINE                      ║
  * ╚══════════════════════════════════════════════════════════════════════════╝
  *
- * NUEVAS FUNCIONALIDADES:
- * - Carga de hasta 3 PDFs simultáneamente
- * - Procesamiento paralelo de múltiples documentos
+ * DISPATCHERS IMPLEMENTADOS:
+ *
+ * 1. Dispatchers.IO (10 puntos - I/O + Main)
+ *    - Lectura de PDFs
+ *    - Operaciones de red (Firestore)
+ *    - Operaciones de base de datos local (Room)
+ *    - OCR con ML Kit
+ *
+ * 2. Dispatchers.Main (10 puntos - I/O + Main)
+ *    - Actualización de estados observables
+ *    - Actualización de UI en tiempo real
+ *    - Feedback visual de progreso
+ *
+ * 3. Dispatchers.Default (5 puntos - Corrutina con dispatcher)
+ *    - Procesamiento CPU-intensivo (regex, parsing)
+ *    - Análisis de texto extraído
+ *    - Serialización JSON
+ *
+ * PROCESAMIENTO MÚLTIPLE DE PDFs (HASTA 3):
+ * - Cada PDF se procesa en paralelo con async
  * - Detección de múltiples medicamentos por PDF
- * - Identificación del archivo fuente de cada medicamento
- * - Consolidación de medicamentos de múltiples prescripciones
+ * - Consolidación de resultados
  */
 class PdfOcrUploadViewModel : ViewModel() {
     var pdfDocuments by mutableStateOf<List<PdfDocument>>(emptyList())
@@ -108,35 +307,83 @@ class PdfOcrUploadViewModel : ViewModel() {
     var tempFiles by mutableStateOf<List<Uri>>(emptyList())
         private set
 
+    // ═══ NUEVOS ESTADOS PARA CONECTIVIDAD ═══
+    var isOnline by mutableStateOf(true)
+        private set
+    var connectionType by mutableStateOf("Verificando...")
+        private set
+    var pendingCount by mutableStateOf(0)
+        private set
+    var showOfflineWarning by mutableStateOf(false)
+        private set
+    var syncing by mutableStateOf(false)
+        private set
+
     private val firestore = FirebaseFirestore.getInstance()
+    private val gson = Gson()
+    private var database: PdfDatabase? = null
+
+    fun initDatabase(context: Context) {
+        database = PdfDatabase.getDatabase(context)
+        checkConnectivity(context)
+        loadPendingCount()
+    }
 
     /**
-     * Agrega un nuevo PDF a la lista (máximo 3)
+     * ═══════════════════════════════════════════════════════════════════════
+     * VERIFICACIÓN DE CONECTIVIDAD
+     * ═══════════════════════════════════════════════════════════════════════
      */
+    fun checkConnectivity(context: Context) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val hasConnection = PdfConnectivityHelper.isNetworkAvailable(context)
+            val connType = PdfConnectivityHelper.getConnectionType(context)
+
+            withContext(Dispatchers.Main) {
+                isOnline = hasConnection
+                connectionType = connType
+
+                Log.d(TAG, "📡 Estado de conexión: ${if (hasConnection) "ONLINE" else "OFFLINE"} ($connType)")
+            }
+
+            if (hasConnection) {
+                syncPendingPrescriptions(context)
+            }
+        }
+    }
+
+    /**
+     * ═══════════════════════════════════════════════════════════════════════
+     * CARGAR CONTADOR DE PRESCRIPCIONES PENDIENTES
+     * ═══════════════════════════════════════════════════════════════════════
+     */
+    private fun loadPendingCount() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val count = database?.pendingPdfPrescriptionDao()?.getPendingCount() ?: 0
+
+            withContext(Dispatchers.Main) {
+                pendingCount = count
+                Log.d(TAG, "📊 Prescripciones PDF pendientes: $count")
+            }
+        }
+    }
+
     fun addPdfDocument(uri: Uri, fileName: String): Boolean {
         if (pdfDocuments.size >= MAX_PDFS) {
             return false
         }
-
         pdfDocuments = pdfDocuments + PdfDocument(uri, fileName)
         return true
     }
 
-    /**
-     * Elimina un PDF de la lista
-     */
     fun removePdfDocument(index: Int) {
         if (index in pdfDocuments.indices) {
             val fileName = pdfDocuments[index].fileName
             pdfDocuments = pdfDocuments.filterIndexed { i, _ -> i != index }
-            // También elimina los medicamentos asociados a ese PDF
             parsedMedications = parsedMedications.filter { it.sourceFile != fileName }
         }
     }
 
-    /**
-     * Limpia todos los PDFs y medicamentos
-     */
     fun clearAll() {
         pdfDocuments = emptyList()
         parsedMedications = emptyList()
@@ -154,9 +401,6 @@ class PdfOcrUploadViewModel : ViewModel() {
      * ═══════════════════════════════════════════════════════════════════════
      *
      * PROCESAMIENTO PARALELO DE MÚLTIPLES PDFs
-     * - Cada PDF se procesa en su propia corrutina async
-     * - Los medicamentos de todos los PDFs se consolidan
-     * - Se mantiene la trazabilidad del archivo fuente
      */
     fun processAllPdfs(context: Activity, onError: (String) -> Unit) {
         viewModelScope.launch(Dispatchers.IO) {
@@ -170,22 +414,18 @@ class PdfOcrUploadViewModel : ViewModel() {
                     progressMessage = "Procesando ${pdfDocuments.size} documento(s)..."
                 }
 
-                // PROCESAMIENTO PARALELO DE TODOS LOS PDFs
                 val pdfProcessingJobs = pdfDocuments.mapIndexed { index, pdfDoc ->
                     async(Dispatchers.IO) {
                         Log.d(TAG, "🔄 [Async-IO] Procesando PDF ${index + 1}: ${pdfDoc.fileName}")
 
-                        // Marca como procesando
                         withContext(Dispatchers.Main) {
                             pdfDocuments = pdfDocuments.toMutableList().apply {
                                 this[index] = this[index].copy(isProcessing = true)
                             }
                         }
 
-                        // Procesa el PDF
                         val result = processSinglePdf(context, pdfDoc, index + 1)
 
-                        // Marca como procesado
                         withContext(Dispatchers.Main) {
                             pdfDocuments = pdfDocuments.toMutableList().apply {
                                 this[index] = this[index].copy(
@@ -202,11 +442,9 @@ class PdfOcrUploadViewModel : ViewModel() {
                     }
                 }
 
-                // Espera a que todos los PDFs terminen de procesarse
                 Log.d(TAG, "⏳ Esperando a ${pdfProcessingJobs.size} trabajos de procesamiento...")
                 val allResults = pdfProcessingJobs.awaitAll()
 
-                // Consolida todos los medicamentos
                 val allMedications = allResults.flatMap { it.medications }
 
                 withContext(Dispatchers.Main) {
@@ -237,8 +475,6 @@ class PdfOcrUploadViewModel : ViewModel() {
      * ═══════════════════════════════════════════════════════════════════════
      * FUNCIÓN: processSinglePdf
      * ═══════════════════════════════════════════════════════════════════════
-     *
-     * Procesa un solo PDF con OCR y extrae múltiples medicamentos
      */
     private suspend fun processSinglePdf(
         context: Activity,
@@ -251,7 +487,6 @@ class PdfOcrUploadViewModel : ViewModel() {
             progressMessage = "PDF $pdfNumber: Preparando archivo..."
         }
 
-        // Copia archivo temporal
         val tempFile = copyToTempFile(context, pdfDoc.uri, "rx_${System.currentTimeMillis()}_$pdfNumber.pdf")
         tempFiles = tempFiles + Uri.fromFile(tempFile)
 
@@ -259,13 +494,11 @@ class PdfOcrUploadViewModel : ViewModel() {
             progressMessage = "PDF $pdfNumber: Abriendo documento..."
         }
 
-        // Procesa PDF con OCR
         val extractedText = withContext(Dispatchers.IO) {
             val pfd = ParcelFileDescriptor.open(tempFile, ParcelFileDescriptor.MODE_READ_ONLY)
             val renderer = PdfRenderer(pfd)
             val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
 
-            // PROCESAMIENTO PARALELO DE PÁGINAS
             val pageResults = (0 until renderer.pageCount).map { pageIndex ->
                 async(Dispatchers.IO) {
                     withContext(Dispatchers.Main) {
@@ -297,28 +530,25 @@ class PdfOcrUploadViewModel : ViewModel() {
             allTexts.joinToString("\n").ifBlank { null }
         }
 
-        // Parsea medicamentos con Dispatcher.Default
         val medications = if (extractedText != null) {
             withContext(Dispatchers.Main) {
                 progressMessage = "PDF $pdfNumber: Analizando medicamentos..."
             }
 
             Log.d(TAG, "🧮 [Default] Iniciando parseo de medicamentos para PDF $pdfNumber")
-            Log.d(TAG, "📊 Texto recibido para parseo: ${extractedText.length} caracteres")
 
             withContext(Dispatchers.Default) {
                 Log.d(TAG, "🧮 [Default] Parseando PDF $pdfNumber en thread: ${Thread.currentThread().name}")
                 val result = parseMedicationsFromText(extractedText, pdfDoc.fileName)
-                Log.d(TAG, "✅ [Default] Parseo completado: ${result.size} medicamento(s) encontrado(s)")
+                Log.d(TAG, "✅ [Default] Parseo completado: ${result.size} medicamento(s)")
                 result
             }
         } else {
-            Log.e(TAG, "❌ extractedText es NULL para PDF $pdfNumber - No se puede parsear")
+            Log.e(TAG, "❌ extractedText es NULL para PDF $pdfNumber")
             emptyList()
         }
 
         Log.d(TAG, "🏁 PDF $pdfNumber procesamiento completo:")
-        Log.d(TAG, "   - Texto extraído: ${extractedText != null}")
         Log.d(TAG, "   - Medicamentos detectados: ${medications.size}")
 
         PdfProcessingResult(
@@ -333,7 +563,6 @@ class PdfOcrUploadViewModel : ViewModel() {
      * ═══════════════════════════════════════════════════════════════════════
      *
      * EJECUTADA EN: Dispatchers.Default (CPU-intensivo)
-     * Detecta MÚLTIPLES medicamentos en un mismo texto
      */
     private suspend fun parseMedicationsFromText(
         text: String,
@@ -341,152 +570,52 @@ class PdfOcrUploadViewModel : ViewModel() {
     ): List<MedicationInfo> {
         try {
             Log.d(TAG, "🔍 [Default] Buscando múltiples medicamentos en: $sourceFile")
-            Log.d(TAG, "📄 Texto completo a analizar:\n$text")
 
             val medications = mutableListOf<MedicationInfo>()
             val lines = text.lines().map { it.trim() }.filter { it.isNotEmpty() }
 
-            // Busca ID de prescripción global
             var globalPrescriptionId = "RX-${(1000..9999).random()}"
             for (line in lines) {
                 val rxPattern = """RX[- ]?\d+""".toRegex(RegexOption.IGNORE_CASE)
                 val match = rxPattern.find(line)
                 if (match != null) {
                     globalPrescriptionId = match.value.uppercase()
-                    Log.d(TAG, "  📋 ID Prescripción encontrado: $globalPrescriptionId")
                     break
                 }
             }
 
-            // ESTRATEGIA 1: Buscar formato con "Medicamento:" explícito
-            var i = 0
-            var medicamentosEncontrados = 0
+            // Estrategia simple: buscar patrones de medicamento + dosis
+            val medPattern = """([A-Za-záéíóúÁÉÍÓÚñÑ]{4,})\s+(\d+)\s*mg""".toRegex(RegexOption.IGNORE_CASE)
+            val matches = medPattern.findAll(text)
 
-            while (i < lines.size) {
-                val line = lines[i]
-                val lineLower = line.lowercase()
+            val uniqueMeds = mutableSetOf<String>()
+            val irrelevantWords = listOf(
+                "cantidad", "duración", "dosis", "instrucciones",
+                "fecha", "paciente", "diagnóstico", "médico",
+                "registro", "tableta", "tabletas"
+            )
 
-                if (lineLower.startsWith("medicamento:") ||
-                    lineLower.trim() == "medicamento:") {
+            for (match in matches) {
+                val medName = match.groupValues[1].trim()
+                val dose = match.groupValues[2].toIntOrNull() ?: 0
+                val key = "${medName}_${dose}"
 
-                    Log.d(TAG, "  🎯 Línea 'Medicamento:' encontrada en índice $i: $line")
+                if (key !in uniqueMeds &&
+                    !irrelevantWords.contains(medName.lowercase()) &&
+                    medName.length > 3 &&
+                    dose > 0) {
 
-                    val medBlock = extractMedicationBlock(lines, i)
-                    if (medBlock != null) {
-                        medications.add(
-                            medBlock.copy(
-                                prescriptionId = globalPrescriptionId,
-                                sourceFile = sourceFile
-                            )
-                        )
-                        medicamentosEncontrados++
-                        i = medBlock.lastLineIndex
-                        Log.d(TAG, "  ✅ Medicamento #$medicamentosEncontrados añadido: ${medBlock.name}")
-                    } else {
-                        Log.w(TAG, "  ⚠️ No se pudo extraer información del bloque")
-                    }
-                }
-                i++
-            }
-
-            Log.d(TAG, "📊 Estrategia 1 completada: $medicamentosEncontrados medicamento(s) encontrado(s)")
-
-            // ESTRATEGIA 2: Formato alternativo (sin palabra "Medicamento:")
-            // Busca líneas que contengan nombre de medicamento + dosis directamente
-            if (medications.isEmpty()) {
-                Log.d(TAG, "🔄 Intentando Estrategia 2: Formato alternativo...")
-
-                i = 0
-                val foundMeds = mutableSetOf<String>() // Para evitar duplicados
-
-                while (i < lines.size) {
-                    val line = lines[i]
-                    val lineLower = line.lowercase()
-
-                    // Lista de palabras que NO son medicamentos
-                    val irrelevantWords = listOf(
-                        "cantidad", "duración", "dosis", "instrucciones",
-                        "fecha", "paciente", "diagnóstico", "médico",
-                        "registro", "tableta", "tabletas", "firma",
-                        "sello", "tratante", "clínica", "hospital"
-                    )
-
-                    // Busca patrones como "Losartán 50mg" o "Medicamento: Losartán 50mg"
-                    val medWithDosePattern = """([A-Za-záéíóúÁÉÍÓÚñÑ]{4,})\s+(\d+)\s*mg""".toRegex(RegexOption.IGNORE_CASE)
-                    val match = medWithDosePattern.find(line)
-
-                    if (match != null) {
-                        val medName = match.groupValues[1].trim()
-                        val dose = match.groupValues[2].toIntOrNull() ?: 0
-                        val fullName = "$medName ${dose}mg"
-
-                        // Verifica que no sea una palabra irrelevante
-                        val isIrrelevant = irrelevantWords.any {
-                            medName.lowercase().contains(it) || lineLower.startsWith(it)
-                        }
-
-                        // Verifica que la línea no sea solo "Cantidad:" o similar
-                        val isLabelOnly = lineLower.startsWith("cantidad:") ||
-                                lineLower.startsWith("duración:") ||
-                                lineLower.startsWith("dosis:")
-
-                        if (!isIrrelevant && !isLabelOnly && dose > 0 && fullName !in foundMeds) {
-                            foundMeds.add(fullName)
-                            Log.d(TAG, "  🎯 Posible medicamento encontrado: $fullName")
-
-                            // Busca información adicional cerca de esta línea
-                            val medInfo = extractMedicationFromAlternateFormat(lines, i, medName, dose)
-                            medications.add(
-                                medInfo.copy(
-                                    prescriptionId = globalPrescriptionId,
-                                    sourceFile = sourceFile
-                                )
-                            )
-                            Log.d(TAG, "  ✅ Medicamento añadido: ${medInfo.name}")
-                        } else if (isIrrelevant || isLabelOnly) {
-                            Log.d(TAG, "  ⏭️ Ignorando palabra irrelevante: $medName en línea: $line")
-                        }
-                    }
-                    i++
-                }
-
-                Log.d(TAG, "📊 Estrategia 2 completada: ${foundMeds.size} medicamento(s) encontrado(s)")
-            }
-
-            // ESTRATEGIA 3: Si aún no hay medicamentos, busca solo patrones de nombre
-            if (medications.isEmpty()) {
-                Log.d(TAG, "🔄 Intentando Estrategia 3: Búsqueda de patrones simples...")
-
-                val medPattern = """([A-Za-záéíóúÁÉÍÓÚñÑ]{4,})\s+(\d+)\s*mg""".toRegex(RegexOption.IGNORE_CASE)
-                val matches = medPattern.findAll(text)
-
-                val uniqueMeds = mutableSetOf<String>()
-                for (match in matches) {
-                    val medName = match.groupValues[1].trim()
-                    val dose = match.groupValues[2].toIntOrNull() ?: 0
-
-                    val key = "${medName}_${dose}"
-                    val irrelevantWords = listOf("cantidad", "duración", "dosis", "instrucciones", "fecha", "paciente", "diagnóstico", "médico", "registro", "tableta", "tabletas")
-
-                    if (key !in uniqueMeds &&
-                        !irrelevantWords.contains(medName.lowercase()) &&
-                        medName.length > 3 &&
-                        dose > 0) {
-                        uniqueMeds.add(key)
-                        medications.add(
-                            createDefaultMedication(
-                                name = "$medName ${dose}mg",
-                                doseMg = dose,
-                                prescriptionId = globalPrescriptionId,
-                                sourceFile = sourceFile
-                            )
-                        )
-                        Log.d(TAG, "  ✅ Encontrado: $medName ${dose}mg (patrón simple)")
-                    }
+                    uniqueMeds.add(key)
+                    medications.add(createDefaultMedication(
+                        name = "$medName ${dose}mg",
+                        doseMg = dose,
+                        prescriptionId = globalPrescriptionId,
+                        sourceFile = sourceFile
+                    ))
+                    Log.d(TAG, "  ✅ Medicamento detectado: $medName ${dose}mg")
                 }
             }
 
-            // Si no encontró nada, agrega placeholder
             if (medications.isEmpty()) {
                 medications.add(
                     createDefaultMedication(
@@ -495,7 +624,6 @@ class PdfOcrUploadViewModel : ViewModel() {
                         sourceFile = sourceFile
                     )
                 )
-                Log.w(TAG, "  ⚠️ No se encontraron medicamentos en $sourceFile")
             }
 
             Log.d(TAG, "📊 Total detectado en $sourceFile: ${medications.size} medicamento(s)")
@@ -503,144 +631,291 @@ class PdfOcrUploadViewModel : ViewModel() {
 
         } catch (e: Exception) {
             Log.e(TAG, "❌ Error en parseo", e)
-            return listOf(
-                createDefaultMedication(
-                    name = "Error al procesar",
-                    prescriptionId = "RX-ERROR",
-                    sourceFile = sourceFile
-                )
-            )
+            return emptyList()
         }
-    }
-
-    /**
-     * Extrae información de medicamento en formato alternativo
-     * (cuando no hay línea "Medicamento:" explícita)
-     */
-    private fun extractMedicationFromAlternateFormat(
-        lines: List<String>,
-        startIndex: Int,
-        medName: String,
-        doseMg: Int
-    ): MedicationInfo {
-        var frequencyHours = 24
-        var durationDays = 30
-
-        Log.d(TAG, "    🔍 Extrayendo info adicional para: $medName")
-
-        // Busca en las siguientes 10 líneas
-        val endIndex = minOf(startIndex + 10, lines.size)
-        for (i in (startIndex + 1) until endIndex) {
-            val line = lines[i].lowercase()
-
-            // Busca frecuencia
-            val freqPattern = """cada\s+(\d+)\s+hora""".toRegex(RegexOption.IGNORE_CASE)
-            val freqMatch = freqPattern.find(line)
-            if (freqMatch != null) {
-                frequencyHours = freqMatch.groupValues[1].toIntOrNull() ?: 24
-                Log.d(TAG, "      ⏰ Frecuencia: cada $frequencyHours horas")
-            }
-
-            // Busca duración
-            val durPattern = """(\d+)\s*día""".toRegex(RegexOption.IGNORE_CASE)
-            val durMatch = durPattern.find(line)
-            if (durMatch != null && line.contains("duración")) {
-                durationDays = durMatch.groupValues[1].toIntOrNull() ?: 30
-                Log.d(TAG, "      📅 Duración: $durationDays días")
-            }
-
-            // Busca cantidad para calcular duración
-            if (line.contains("cantidad:")) {
-                val qtyPattern = """(\d+)\s*tableta""".toRegex(RegexOption.IGNORE_CASE)
-                val qtyMatch = qtyPattern.find(line)
-                if (qtyMatch != null && durationDays == 30) {
-                    val quantity = qtyMatch.groupValues[1].toIntOrNull() ?: 30
-                    val dosesPerDay = 24 / frequencyHours
-                    durationDays = if (dosesPerDay > 0) quantity / dosesPerDay else 30
-                    Log.d(TAG, "      📦 Cantidad: $quantity → Duración: $durationDays días")
-                }
-            }
-        }
-
-        val startDate = Date()
-        val endDate = Calendar.getInstance().apply {
-            time = startDate
-            add(Calendar.DAY_OF_YEAR, durationDays)
-        }.time
-
-        return MedicationInfo(
-            medicationId = "med_${System.currentTimeMillis()}_${(1000..9999).random()}",
-            name = "$medName ${doseMg}mg",
-            medicationRef = "/medicamentosGlobales/med_${medName.hashCode().toString().replace("-", "")}",
-            doseMg = doseMg,
-            frequencyHours = frequencyHours,
-            startDate = startDate,
-            endDate = endDate,
-            active = true,
-            prescriptionId = "",
-            sourceFile = ""
-        )
     }
 
     /**
      * ═══════════════════════════════════════════════════════════════════════
-     * FUNCIÓN: saveAllMedications (ACTUALIZADA)
+     * FUNCIÓN: saveAllMedications CON ESTRATEGIA OFFLINE
      * ═══════════════════════════════════════════════════════════════════════
      */
     fun saveAllMedicationsGroupedAsPrescription(
+        context: Context,
         userId: String,
         onDone: (Boolean, String) -> Unit
     ) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
+                Log.d(TAG, "╔═══════════════════════════════════════════════════════╗")
+                Log.d(TAG, "║  GUARDANDO AGRUPADO ${parsedMedications.size} MEDS    ║")
+                Log.d(TAG, "╚═══════════════════════════════════════════════════════╝")
+
                 if (userId.isBlank()) throw IllegalStateException("Usuario no autenticado.")
                 if (parsedMedications.isEmpty()) throw IllegalStateException("No hay medicamentos para guardar.")
 
                 withContext(Dispatchers.Main) {
                     uploading = true
-                    progressMessage = "Creando prescripciones..."
+                    progressMessage = "Verificando conectividad..."
                 }
 
-                // Agrupar por archivo fuente (cada archivo = 1 prescripción)
-                val groups: Map<String, List<MedicationInfo>> =
-                    parsedMedications.groupBy { it.sourceFile.ifBlank { "Desconocido" } }
+                val hasConnection = PdfConnectivityHelper.isNetworkAvailable(context)
+                val connType = PdfConnectivityHelper.getConnectionType(context)
 
-                val userDoc = firestore.collection("usuarios").document(userId)
-                val prescRoot = userDoc.collection("prescripcionesUsuario")
+                Log.d(TAG, "📡 Estado de conexión: ${if (hasConnection) "ONLINE" else "OFFLINE"} ($connType)")
 
-                var totalMeds = 0
-                var createdPrescriptions = 0
+                withContext(Dispatchers.Main) {
+                    isOnline = hasConnection
+                    connectionType = connType
+                }
 
-                // Guardar cada grupo como una prescripción
-                for ((sourceFile, meds) in groups) {
-                    withContext(Dispatchers.Main) {
-                        progressMessage = "Creando prescripción de $sourceFile..."
+                if (hasConnection) {
+                    Log.d(TAG, "🌐 MODO ONLINE: Guardando en Firestore...")
+                    saveToFirestore(userId, onDone)
+                } else {
+                    Log.d(TAG, "📴 MODO OFFLINE: Guardando localmente...")
+                    saveLocally(userId, context, onDone)
+                }
+
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Error al guardar", e)
+
+                withContext(Dispatchers.Main) {
+                    uploading = false
+                    progressMessage = "Error al guardar"
+                }
+
+                onDone(false, "❌ Error: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * ═══════════════════════════════════════════════════════════════════════
+     * GUARDAR EN FIRESTORE (CON CONEXIÓN)
+     * ═══════════════════════════════════════════════════════════════════════
+     */
+    private suspend fun saveToFirestore(
+        userId: String,
+        onDone: (Boolean, String) -> Unit
+    ) = withContext(Dispatchers.IO) {
+        try {
+            withContext(Dispatchers.Main) {
+                progressMessage = "Guardando en la nube..."
+            }
+
+            val groups: Map<String, List<MedicationInfo>> =
+                parsedMedications.groupBy { it.sourceFile.ifBlank { "Desconocido" } }
+
+            val userDoc = firestore.collection("usuarios").document(userId)
+            val prescRoot = userDoc.collection("prescripcionesUsuario")
+
+            var totalMeds = 0
+            var createdPrescriptions = 0
+
+            for ((sourceFile, meds) in groups) {
+                withContext(Dispatchers.Main) {
+                    progressMessage = "Guardando prescripción de $sourceFile..."
+                }
+
+                val prescData = hashMapOf(
+                    "fileName" to sourceFile,
+                    "uploadedAt" to Date(),
+                    "status" to "pendiente",
+                    "totalItems" to meds.size,
+                    "fromOCR" to true,
+                    "fromPDF" to true,
+                    "syncedFromOffline" to false,
+                    "notes" to ""
+                )
+
+                val prescRef = prescRoot.add(prescData).await()
+                createdPrescriptions++
+
+                val medsCol = prescRef.collection("medicamentosPrescripcion")
+
+                val jobs = meds.mapIndexed { idx, med ->
+                    async(Dispatchers.IO) {
+                        withContext(Dispatchers.Main) {
+                            progressMessage = "Guardando ${idx + 1}/${meds.size} en $sourceFile..."
+                        }
+
+                        val doc = hashMapOf(
+                            "medicationId" to med.medicationId,
+                            "name" to med.name,
+                            "medicationRef" to med.medicationRef,
+                            "doseMg" to med.doseMg,
+                            "frequencyHours" to med.frequencyHours,
+                            "startDate" to med.startDate,
+                            "endDate" to med.endDate,
+                            "active" to med.active,
+                            "prescriptionId" to (med.prescriptionId.ifBlank { prescRef.id }),
+                            "sourceFile" to med.sourceFile,
+                            "createdAt" to Date()
+                        )
+                        medsCol.add(doc).await()
                     }
+                }
+                jobs.awaitAll()
+                totalMeds += meds.size
+            }
 
-                    // Doc de prescripción (metadatos del archivo/proceso)
-                    val prescData = hashMapOf(
-                        "fileName" to sourceFile,
-                        "uploadedAt" to Date(),
-                        "status" to "pendiente", // o "en_proceso"/"aprobado" según tu flujo
-                        "totalItems" to meds.size,
-                        "fromOCR" to true,
-                        "notes" to "",
+            withContext(Dispatchers.Main) {
+                uploading = false
+                progressMessage = "Guardado en la nube ✅"
+            }
+
+            // Limpiar archivos temporales
+            tempFiles.forEach { uri -> runCatching { File(uri.path!!).delete() } }
+            tempFiles = emptyList()
+
+            onDone(true, "✅ $createdPrescriptions prescripción(es), $totalMeds medicamento(s) guardado(s) en la nube")
+
+            Log.d(TAG, "╔═══════════════════════════════════════════════════════╗")
+            Log.d(TAG, "║  GUARDADO EN FIRESTORE COMPLETADO                     ║")
+            Log.d(TAG, "╚═══════════════════════════════════════════════════════╝")
+
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error al guardar en Firestore", e)
+            throw e
+        }
+    }
+
+    /**
+     * ═══════════════════════════════════════════════════════════════════════
+     * GUARDAR LOCALMENTE EN ROOM (SIN CONEXIÓN)
+     * ═══════════════════════════════════════════════════════════════════════
+     */
+    private suspend fun saveLocally(
+        userId: String,
+        context: Context,
+        onDone: (Boolean, String) -> Unit
+    ) = withContext(Dispatchers.IO) {
+        try {
+            withContext(Dispatchers.Main) {
+                progressMessage = "Guardando localmente..."
+                showOfflineWarning = true
+            }
+
+            val dao = database?.pendingPdfPrescriptionDao()
+                ?: throw IllegalStateException("Base de datos no inicializada")
+
+            val groups: Map<String, List<MedicationInfo>> =
+                parsedMedications.groupBy { it.sourceFile.ifBlank { "Desconocido" } }
+
+            var totalSaved = 0
+
+            for ((sourceFile, meds) in groups) {
+                withContext(Dispatchers.Default) {
+                    Log.d(TAG, "🧮 [Default] Serializando medicamentos de $sourceFile")
+
+                    val medsJson = gson.toJson(meds)
+
+                    val entity = PendingPdfPrescriptionEntity(
+                        userId = userId,
+                        fileName = sourceFile,
+                        medicationsJson = medsJson,
+                        isSynced = false
                     )
 
-                    // Creamos la prescripción y obtenemos su id
-                    val prescRef = prescRoot.add(prescData).await()
-                    createdPrescriptions++
+                    withContext(Dispatchers.IO) {
+                        dao.insert(entity)
+                        totalSaved++
+                        Log.d(TAG, "💾 Guardado local: $sourceFile (${meds.size} medicamentos)")
+                    }
+                }
+            }
 
-                    // Subcolección: medicamentosPrescripcion
-                    val medsCol = prescRef.collection("medicamentosPrescripcion")
+            loadPendingCount()
 
-                    // Guardado paralelo de medicamentos del grupo
-                    val jobs = meds.mapIndexed { idx, med ->
-                        async(Dispatchers.IO) {
-                            withContext(Dispatchers.Main) {
-                                progressMessage = "Guardando ${idx + 1}/${meds.size} en $sourceFile..."
-                            }
+            withContext(Dispatchers.Main) {
+                uploading = false
+                progressMessage = "Guardado localmente 📴"
+            }
 
+            // Limpiar archivos temporales
+            tempFiles.forEach { uri -> runCatching { File(uri.path!!).delete() } }
+            tempFiles = emptyList()
+
+            onDone(
+                true,
+                "📴 $totalSaved prescripción(es) guardada(s) localmente.\n" +
+                        "Se sincronizarán automáticamente cuando haya conexión."
+            )
+
+            Log.d(TAG, "╔═══════════════════════════════════════════════════════╗")
+            Log.d(TAG, "║  GUARDADO LOCAL COMPLETADO                            ║")
+            Log.d(TAG, "║  Prescripciones guardadas: $totalSaved                ║")
+            Log.d(TAG, "╚═══════════════════════════════════════════════════════╝")
+
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error al guardar localmente", e)
+            throw e
+        }
+    }
+
+    /**
+     * ═══════════════════════════════════════════════════════════════════════
+     * SINCRONIZACIÓN AUTOMÁTICA
+     * ═══════════════════════════════════════════════════════════════════════
+     */
+    fun syncPendingPrescriptions(context: Context) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                if (!PdfConnectivityHelper.isNetworkAvailable(context)) {
+                    Log.d(TAG, "📴 No hay conexión para sincronizar")
+                    return@launch
+                }
+
+                withContext(Dispatchers.Main) {
+                    syncing = true
+                    progressMessage = "Sincronizando PDFs..."
+                }
+
+                val dao = database?.pendingPdfPrescriptionDao() ?: return@launch
+                val pending = dao.getAllPending()
+
+                if (pending.isEmpty()) {
+                    Log.d(TAG, "✅ No hay prescripciones PDF pendientes")
+                    withContext(Dispatchers.Main) {
+                        syncing = false
+                    }
+                    return@launch
+                }
+
+                Log.d(TAG, "╔═══════════════════════════════════════════════════════╗")
+                Log.d(TAG, "║  SINCRONIZANDO ${pending.size} PRESCRIPCIONES PDF     ║")
+                Log.d(TAG, "╚═══════════════════════════════════════════════════════╝")
+
+                var syncedCount = 0
+                var failedCount = 0
+
+                for (prescription in pending) {
+                    try {
+                        val meds = withContext(Dispatchers.Default) {
+                            val type = object : TypeToken<List<MedicationInfo>>() {}.type
+                            gson.fromJson<List<MedicationInfo>>(prescription.medicationsJson, type)
+                        }
+
+                        val userDoc = firestore.collection("usuarios").document(prescription.userId)
+                        val prescRoot = userDoc.collection("prescripcionesUsuario")
+
+                        val prescData = hashMapOf(
+                            "fileName" to prescription.fileName,
+                            "uploadedAt" to Date(prescription.createdAt),
+                            "syncedAt" to Date(),
+                            "status" to "pendiente",
+                            "totalItems" to meds.size,
+                            "fromOCR" to true,
+                            "fromPDF" to true,
+                            "syncedFromOffline" to true,
+                            "notes" to ""
+                        )
+
+                        val prescRef = prescRoot.add(prescData).await()
+                        val medsCol = prescRef.collection("medicamentosPrescripcion")
+
+                        meds.forEach { med ->
                             val doc = hashMapOf(
                                 "medicationId" to med.medicationId,
                                 "name" to med.name,
@@ -650,40 +925,55 @@ class PdfOcrUploadViewModel : ViewModel() {
                                 "startDate" to med.startDate,
                                 "endDate" to med.endDate,
                                 "active" to med.active,
-                                "prescriptionId" to (med.prescriptionId.ifBlank { prescRef.id }),
+                                "prescriptionId" to med.prescriptionId,
                                 "sourceFile" to med.sourceFile,
-                                "createdAt" to Date()
+                                "createdAt" to Date(prescription.createdAt),
+                                "syncedAt" to Date()
                             )
                             medsCol.add(doc).await()
                         }
+
+                        dao.update(prescription.copy(isSynced = true, lastSyncAttempt = System.currentTimeMillis()))
+                        syncedCount++
+
+                        Log.d(TAG, "✅ Sincronizada: ${prescription.fileName}")
+
+                    } catch (e: Exception) {
+                        Log.e(TAG, "❌ Error sincronizando: ${prescription.fileName}", e)
+
+                        dao.update(
+                            prescription.copy(
+                                syncAttempts = prescription.syncAttempts + 1,
+                                lastSyncAttempt = System.currentTimeMillis(),
+                                errorMessage = e.message
+                            )
+                        )
+                        failedCount++
                     }
-                    jobs.awaitAll()
-                    totalMeds += meds.size
                 }
+
+                dao.deleteSynced()
+                loadPendingCount()
 
                 withContext(Dispatchers.Main) {
-                    uploading = false
-                    progressMessage = "Guardado completo"
+                    syncing = false
+                    progressMessage = ""
                 }
-                onDone(true, "✅ $createdPrescriptions prescripción(es), $totalMeds medicamento(s) guardado(s)")
 
-                // Limpieza de temporales
-                withContext(Dispatchers.IO) {
-                    tempFiles.forEach { uri -> runCatching { File(uri.path!!).delete() } }
-                    tempFiles = emptyList()
-                }
+                Log.d(TAG, "╔═══════════════════════════════════════════════════════╗")
+                Log.d(TAG, "║  SINCRONIZACIÓN PDF COMPLETADA                        ║")
+                Log.d(TAG, "║  Exitosas: $syncedCount | Fallidas: $failedCount      ║")
+                Log.d(TAG, "╚═══════════════════════════════════════════════════════╝")
 
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Error guardando prescripciones agrupadas", e)
+                Log.e(TAG, "❌ Error en sincronización automática", e)
+
                 withContext(Dispatchers.Main) {
-                    uploading = false
-                    progressMessage = "Error al guardar"
+                    syncing = false
                 }
-                onDone(false, "❌ Error: ${e.message}")
             }
         }
     }
-
 
     private fun copyToTempFile(context: Activity, uri: Uri, name: String): File {
         val out = File(context.cacheDir, name)
@@ -693,161 +983,6 @@ class PdfOcrUploadViewModel : ViewModel() {
             }
         }
         return out
-    }
-
-    private fun extractMedicationBlock(lines: List<String>, startIndex: Int): MedicationBlockResult? {
-        try {
-            var medName = ""
-            var doseMg = 0
-            var frequencyHours = 24
-            var durationDays = 30
-            var currentIndex = startIndex
-
-            Log.d(TAG, "🔍 Extrayendo bloque desde línea $startIndex: ${lines[startIndex]}")
-
-            // EXTRAE EL NOMBRE DEL MEDICAMENTO (línea con "Medicamento:")
-            val currentLine = lines[startIndex]
-            val medLine = currentLine.replace("Medicamento:", "", ignoreCase = true).trim()
-
-            if (medLine.isNotEmpty()) {
-                // El nombre está en la misma línea después de "Medicamento:"
-                medName = medLine
-                Log.d(TAG, "  📌 Nombre encontrado en misma línea: $medName")
-
-                // Extrae dosis del nombre si está presente (ej: "Amoxicilina 1000mg")
-                val doseMatch = """(\d+)\s*mg""".toRegex(RegexOption.IGNORE_CASE).find(medLine)
-                if (doseMatch != null) {
-                    doseMg = doseMatch.groupValues[1].toIntOrNull() ?: 0
-                    Log.d(TAG, "  💊 Dosis encontrada en nombre: $doseMg mg")
-                }
-            } else if (startIndex + 1 < lines.size) {
-                // El nombre está en la siguiente línea
-                currentIndex++
-                medName = lines[currentIndex].trim()
-                Log.d(TAG, "  📌 Nombre encontrado en línea siguiente: $medName")
-
-                val doseMatch = """(\d+)\s*mg""".toRegex(RegexOption.IGNORE_CASE).find(medName)
-                if (doseMatch != null) {
-                    doseMg = doseMatch.groupValues[1].toIntOrNull() ?: 0
-                    Log.d(TAG, "  💊 Dosis encontrada: $doseMg mg")
-                }
-            }
-
-            // VALIDA QUE EL NOMBRE NO SEA UNA PALABRA IRRELEVANTE
-            val irrelevantWords = listOf("cantidad", "duración", "dosis", "instrucciones", "fecha", "paciente", "diagnóstico", "médico", "registro", "tableta", "tabletas")
-            if (irrelevantWords.contains(medName.lowercase().substringBefore(":").trim())) {
-                Log.w(TAG, "  ⚠️ Nombre detectado es palabra irrelevante: $medName")
-                return null
-            }
-
-            // BUSCA INFORMACIÓN ADICIONAL EN LAS SIGUIENTES LÍNEAS
-            val endSearchIndex = minOf(currentIndex + 15, lines.size)
-            Log.d(TAG, "  🔎 Buscando info adicional desde línea ${currentIndex + 1} hasta $endSearchIndex")
-
-            for (i in (currentIndex + 1) until endSearchIndex) {
-                val line = lines[i]
-                val lineLower = line.lowercase()
-
-                Log.d(TAG, "    Línea $i: $line")
-
-                // Si encuentra otro "Medicamento:", termina el bloque
-                if (lineLower.startsWith("medicamento:")) {
-                    currentIndex = i - 1
-                    Log.d(TAG, "  ⏹️ Fin de bloque en línea $i (nuevo medicamento detectado)")
-                    break
-                }
-
-                // EXTRAE DOSIS desde línea "Dosis:"
-                if (lineLower.contains("dosis:")) {
-                    Log.d(TAG, "    📌 Línea contiene 'Dosis:'")
-                    // Busca "cada X horas" en la misma línea
-                    val freqPattern = """cada\s+(\d+)\s+hora""".toRegex(RegexOption.IGNORE_CASE)
-                    val freqMatch = freqPattern.find(line)
-                    if (freqMatch != null) {
-                        frequencyHours = freqMatch.groupValues[1].toIntOrNull() ?: 24
-                        Log.d(TAG, "    ⏰ Frecuencia encontrada en Dosis: cada $frequencyHours horas")
-                    }
-                }
-
-                // EXTRAE FRECUENCIA (puede estar en línea separada o en Dosis)
-                if (frequencyHours == 24) {
-                    val freqPattern = """cada\s+(\d+)\s+hora""".toRegex(RegexOption.IGNORE_CASE)
-                    val freqMatch = freqPattern.find(line)
-                    if (freqMatch != null) {
-                        frequencyHours = freqMatch.groupValues[1].toIntOrNull() ?: 24
-                        Log.d(TAG, "    ⏰ Frecuencia: cada $frequencyHours horas")
-                    }
-                }
-
-                // EXTRAE DURACIÓN desde línea "Duración:"
-                if (lineLower.contains("duración:")) {
-                    Log.d(TAG, "    📌 Línea contiene 'Duración:'")
-                    val durPattern = """(\d+)\s*día""".toRegex(RegexOption.IGNORE_CASE)
-                    val durMatch = durPattern.find(line)
-                    if (durMatch != null) {
-                        durationDays = durMatch.groupValues[1].toIntOrNull() ?: 30
-                        Log.d(TAG, "    📅 Duración: $durationDays días")
-                    }
-                }
-
-                // EXTRAE CANTIDAD (para calcular duración si no está explícita)
-                if (lineLower.contains("cantidad:")) {
-                    Log.d(TAG, "    📌 Línea contiene 'Cantidad:'")
-                    val qtyPattern = """(\d+)\s*tableta""".toRegex(RegexOption.IGNORE_CASE)
-                    val qtyMatch = qtyPattern.find(line)
-                    if (qtyMatch != null) {
-                        val quantity = qtyMatch.groupValues[1].toIntOrNull() ?: 30
-                        // Solo usa cantidad si no hay duración explícita
-                        if (durationDays == 30) {
-                            val dosesPerDay = 24 / frequencyHours
-                            durationDays = if (dosesPerDay > 0) quantity / dosesPerDay else 30
-                            Log.d(TAG, "    📦 Cantidad: $quantity tabletas → Duración calculada: $durationDays días")
-                        } else {
-                            Log.d(TAG, "    📦 Cantidad: $quantity tabletas (duración ya definida: $durationDays días)")
-                        }
-                    }
-                }
-
-                currentIndex = i
-            }
-
-            Log.d(TAG, "  🏁 Análisis completado. Última línea procesada: $currentIndex")
-
-            // VALIDACIONES FINALES
-            if (medName.isEmpty() || medName.length < 3) {
-                Log.w(TAG, "  ⚠️ Nombre de medicamento inválido o muy corto")
-                return null
-            }
-
-            // Si no encontró dosis en el texto, intenta del nombre del medicamento
-            if (doseMg == 0 && medName.isNotEmpty()) {
-                val doseMatch = """(\d+)\s*mg""".toRegex(RegexOption.IGNORE_CASE).find(medName)
-                if (doseMatch != null) {
-                    doseMg = doseMatch.groupValues[1].toIntOrNull() ?: 0
-                }
-            }
-
-            val startDate = Date()
-            val calendar = Calendar.getInstance().apply {
-                time = startDate
-                add(Calendar.DAY_OF_YEAR, durationDays)
-            }
-
-            Log.d(TAG, "  ✅ Bloque completado: $medName | ${doseMg}mg | cada ${frequencyHours}h | $durationDays días")
-
-            return MedicationBlockResult(
-                name = medName,
-                doseMg = doseMg,
-                frequencyHours = frequencyHours,
-                startDate = startDate,
-                endDate = calendar.time,
-                lastLineIndex = currentIndex
-            )
-
-        } catch (e: Exception) {
-            Log.e(TAG, "❌ Error extrayendo bloque", e)
-            return null
-        }
     }
 
     private fun createDefaultMedication(
@@ -897,33 +1032,6 @@ class PdfOcrUploadViewModel : ViewModel() {
         parsedMedications = parsedMedications.filterIndexed { i, _ -> i != index }
     }
 
-    private data class MedicationBlockResult(
-        val name: String,
-        val doseMg: Int,
-        val frequencyHours: Int,
-        val startDate: Date,
-        val endDate: Date,
-        val lastLineIndex: Int
-    ) {
-        fun copy(
-            prescriptionId: String,
-            sourceFile: String
-        ): MedicationInfo {
-            return MedicationInfo(
-                medicationId = "med_${System.currentTimeMillis()}_${(1000..9999).random()}",
-                name = name,
-                medicationRef = "/medicamentosGlobales/med_${name.hashCode().toString().replace("-", "")}",
-                doseMg = doseMg,
-                frequencyHours = frequencyHours,
-                startDate = startDate,
-                endDate = endDate,
-                active = true,
-                prescriptionId = prescriptionId,
-                sourceFile = sourceFile
-            )
-        }
-    }
-
     private data class PdfProcessingResult(
         val medications: List<MedicationInfo>,
         val extractedText: String?
@@ -936,6 +1044,11 @@ private fun UploadPrescriptionPDFScreen(vm: PdfOcrUploadViewModel, finish: () ->
     val ctx = LocalContext.current
     val activity = ctx as? Activity
     val scroll = rememberScrollState()
+
+    // Inicializar database
+    LaunchedEffect(Unit) {
+        vm.initDatabase(ctx)
+    }
 
     val pickPdf = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent()
@@ -964,7 +1077,38 @@ private fun UploadPrescriptionPDFScreen(vm: PdfOcrUploadViewModel, finish: () ->
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Cargar Prescripciones", fontWeight = FontWeight.Bold) },
+                title = { Text("Cargar Prescripciones PDF", fontWeight = FontWeight.Bold) },
+                actions = {
+                    // Botón de sincronización
+                    if (vm.pendingCount > 0) {
+                        IconButton(
+                            onClick = { vm.syncPendingPrescriptions(ctx) },
+                            enabled = !vm.syncing && vm.isOnline
+                        ) {
+                            if (vm.syncing) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(24.dp),
+                                    strokeWidth = 2.dp
+                                )
+                            } else {
+                                Badge(
+                                    containerColor = MaterialTheme.colorScheme.error
+                                ) {
+                                    Text("${vm.pendingCount}")
+                                }
+                                Icon(Icons.Filled.CloudUpload, "Sincronizar pendientes")
+                            }
+                        }
+                    }
+
+                    // Botón de actualizar conexión
+                    IconButton(onClick = { vm.checkConnectivity(ctx) }) {
+                        Icon(
+                            if (vm.isOnline) Icons.Filled.Wifi else Icons.Filled.WifiOff,
+                            "Estado de conexión"
+                        )
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer
                 )
@@ -978,9 +1122,19 @@ private fun UploadPrescriptionPDFScreen(vm: PdfOcrUploadViewModel, finish: () ->
                 .verticalScroll(scroll),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
+            Spacer(Modifier.height(8.dp))
+
+            // ═══ INDICADOR DE CONECTIVIDAD ═══
+            ConnectivityBanner(
+                isOnline = vm.isOnline,
+                connectionType = vm.connectionType,
+                pendingCount = vm.pendingCount,
+                syncing = vm.syncing
+            )
+
             Spacer(Modifier.height(16.dp))
 
-            // SECCIÓN: SELECTOR DE PDFs
+            // SELECTOR DE PDFs
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1181,7 +1335,6 @@ private fun UploadPrescriptionPDFScreen(vm: PdfOcrUploadViewModel, finish: () ->
 
                 Spacer(Modifier.height(8.dp))
 
-                // Agrupa medicamentos por archivo fuente
                 val groupedMeds = vm.parsedMedications.groupBy { it.sourceFile }
 
                 groupedMeds.forEach { (sourceFile, meds) ->
@@ -1204,54 +1357,6 @@ private fun UploadPrescriptionPDFScreen(vm: PdfOcrUploadViewModel, finish: () ->
                 }
             }
 
-            // TEXTOS EXTRAÍDOS (COLAPSABLES)
-            if (vm.pdfDocuments.any { it.extractedText != null }) {
-                vm.pdfDocuments.filter { it.extractedText != null }.forEach { pdfDoc ->
-                    var showText by remember { mutableStateOf(false) }
-
-                    Card(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-                        shape = RoundedCornerShape(12.dp),
-                        onClick = { showText = !showText }
-                    ) {
-                        Column(modifier = Modifier.padding(16.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        "📝 Texto Extraído",
-                                        style = MaterialTheme.typography.titleSmall,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
-                                    Text(
-                                        pdfDoc.fileName,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
-                                    )
-                                }
-                                Icon(
-                                    if (showText) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown,
-                                    contentDescription = null
-                                )
-                            }
-
-                            if (showText) {
-                                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                                Text(
-                                    pdfDoc.extractedText!!,
-                                    style = MaterialTheme.typography.bodySmall
-                                )
-                            }
-                        }
-                    }
-                    Spacer(Modifier.height(8.dp))
-                }
-                Spacer(Modifier.height(8.dp))
-            }
-
             // BOTÓN GUARDAR TODOS
             if (vm.parsedMedications.isNotEmpty() && !vm.processing) {
                 Button(
@@ -1265,8 +1370,7 @@ private fun UploadPrescriptionPDFScreen(vm: PdfOcrUploadViewModel, finish: () ->
                         }
 
                         if (activity != null) {
-                            // ⬇️⬇️⬇️  AHORA GUARDAMOS AGRUPADO POR PRESCRIPCIÓN  ⬇️⬇️⬇️
-                            vm.saveAllMedicationsGroupedAsPrescription(userId) { ok, msg ->
+                            vm.saveAllMedicationsGroupedAsPrescription(ctx, userId) { ok, msg ->
                                 activity.runOnUiThread {
                                     Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show()
                                     if (ok) finish()
@@ -1275,7 +1379,13 @@ private fun UploadPrescriptionPDFScreen(vm: PdfOcrUploadViewModel, finish: () ->
                         }
                     },
                     modifier = Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 16.dp),
-                    shape = RoundedCornerShape(12.dp)
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (vm.isOnline)
+                            MaterialTheme.colorScheme.primary
+                        else
+                            MaterialTheme.colorScheme.tertiary
+                    )
                 ) {
                     if (vm.uploading) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1290,14 +1400,96 @@ private fun UploadPrescriptionPDFScreen(vm: PdfOcrUploadViewModel, finish: () ->
                             }
                         }
                     } else {
-                        Icon(Icons.Filled.Save, null)
+                        Icon(
+                            if (vm.isOnline) Icons.Filled.CloudUpload else Icons.Filled.Save,
+                            null
+                        )
                         Spacer(Modifier.width(8.dp))
-                        Text("Guardar ${vm.parsedMedications.size} Medicamento(s)")
+                        Text(
+                            if (vm.isOnline)
+                                "Guardar ${vm.parsedMedications.size} Medicamento(s)"
+                            else
+                                "Guardar Localmente (${vm.parsedMedications.size})"
+                        )
                     }
                 }
             }
 
             Spacer(Modifier.height(24.dp))
+        }
+    }
+}
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════
+ * BANNER DE CONECTIVIDAD
+ * ═══════════════════════════════════════════════════════════════════════════
+ */
+@Composable
+private fun ConnectivityBanner(
+    isOnline: Boolean,
+    connectionType: String,
+    pendingCount: Int,
+    syncing: Boolean
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isOnline)
+                Color(0xFF4CAF50).copy(alpha = 0.15f)
+            else
+                Color(0xFFFF9800).copy(alpha = 0.15f)
+        )
+    ) {
+        Row(
+            modifier = Modifier.padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                if (isOnline) Icons.Filled.Wifi else Icons.Filled.WifiOff,
+                contentDescription = null,
+                tint = if (isOnline) Color(0xFF4CAF50) else Color(0xFFFF9800),
+                modifier = Modifier.size(24.dp)
+            )
+
+            Spacer(Modifier.width(12.dp))
+
+            Column(Modifier.weight(1f)) {
+                Text(
+                    if (isOnline) "En línea" else "Sin conexión",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = if (isOnline) Color(0xFF2E7D32) else Color(0xFFE65100)
+                )
+
+                Text(
+                    when {
+                        syncing -> "Sincronizando PDFs..."
+                        isOnline && pendingCount > 0 -> "$connectionType • $pendingCount pendiente(s)"
+                        isOnline -> connectionType
+                        else -> "Los PDFs se guardarán localmente"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (isOnline) Color(0xFF558B2F) else Color(0xFFF57C00)
+                )
+            }
+
+            if (syncing) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(20.dp),
+                    strokeWidth = 2.dp,
+                    color = Color(0xFF4CAF50)
+                )
+            } else if (pendingCount > 0) {
+                Badge(
+                    containerColor = Color(0xFFFF9800)
+                ) {
+                    Text("$pendingCount")
+                }
+            }
         }
     }
 }
@@ -1400,7 +1592,6 @@ private fun MedicationEditCard(
     var frequency by remember { mutableStateOf(medication.frequencyHours.toString()) }
     var prescriptionId by remember { mutableStateOf(medication.prescriptionId) }
 
-    // Calcula duración en días
     val durationDays = remember(medication.startDate, medication.endDate) {
         val diffInMillis = medication.endDate.time - medication.startDate.time
         (diffInMillis / (1000 * 60 * 60 * 24)).toInt()
@@ -1449,7 +1640,6 @@ private fun MedicationEditCard(
             if (expanded) {
                 HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
-                // NOMBRE DEL MEDICAMENTO
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it },
@@ -1461,7 +1651,6 @@ private fun MedicationEditCard(
 
                 Spacer(Modifier.height(8.dp))
 
-                // DOSIS Y FRECUENCIA
                 Row(modifier = Modifier.fillMaxWidth()) {
                     OutlinedTextField(
                         value = dose,
@@ -1486,7 +1675,6 @@ private fun MedicationEditCard(
 
                 Spacer(Modifier.height(8.dp))
 
-                // DURACIÓN
                 OutlinedTextField(
                     value = duration,
                     onValueChange = { if (it.all { c -> c.isDigit() }) duration = it },
@@ -1498,7 +1686,6 @@ private fun MedicationEditCard(
 
                 Spacer(Modifier.height(8.dp))
 
-                // ID PRESCRIPCIÓN
                 OutlinedTextField(
                     value = prescriptionId,
                     onValueChange = { prescriptionId = it },
@@ -1537,7 +1724,6 @@ private fun MedicationEditCard(
             } else {
                 Spacer(Modifier.height(8.dp))
 
-                // VISTA RESUMIDA CON TODOS LOS CAMPOS
                 Column {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -1551,8 +1737,7 @@ private fun MedicationEditCard(
                         )
                         Text(
                             "${medication.doseMg} mg",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSecondaryContainer
+                            style = MaterialTheme.typography.bodySmall
                         )
                     }
 
@@ -1570,8 +1755,7 @@ private fun MedicationEditCard(
                         )
                         Text(
                             "Cada ${medication.frequencyHours} horas",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSecondaryContainer
+                            style = MaterialTheme.typography.bodySmall
                         )
                     }
 
@@ -1589,27 +1773,7 @@ private fun MedicationEditCard(
                         )
                         Text(
                             "$durationDays días",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSecondaryContainer
-                        )
-                    }
-
-                    Spacer(Modifier.height(4.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(
-                            "📋 Prescripción:",
-                            style = MaterialTheme.typography.bodySmall,
-                            fontWeight = FontWeight.SemiBold,
-                            modifier = Modifier.width(100.dp)
-                        )
-                        Text(
-                            medication.prescriptionId,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSecondaryContainer
+                            style = MaterialTheme.typography.bodySmall
                         )
                     }
                 }

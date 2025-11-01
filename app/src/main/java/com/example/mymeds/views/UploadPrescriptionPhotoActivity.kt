@@ -1,10 +1,13 @@
 package com.example.mymeds.views
 
 import android.app.Activity
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Matrix
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.OpenableColumns
 import android.util.Log
@@ -20,24 +23,31 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.border
+import androidx.compose.foundation.background
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.room.*
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.*
 import kotlinx.coroutines.tasks.await
+import java.io.File
 import java.util.*
 
 private const val TAG = "PhotoUploadActivity"
@@ -64,7 +74,7 @@ data class ImageDocument(
     val extractedText: String? = null
 )
 
-data class MedicationInfo(
+data class MedicationInfo2(
     val medicationId: String,
     val name: String,
     val medicationRef: String,
@@ -77,10 +87,195 @@ data class MedicationInfo(
     val sourceFile: String = ""
 )
 
+/* ═══════════════════════════════════════════════════════════════════════════
+ * ║                      ESTRATEGIA DE CONECTIVIDAD                         ║
+ * ║                    ALMACENAMIENTO LOCAL CON ROOM                        ║
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * ARQUITECTURA DE PERSISTENCIA OFFLINE:
+ *
+ * 1. DETECCIÓN DE CONECTIVIDAD:
+ *    - ConnectivityManager para verificar estado de red
+ *    - Soporte para WiFi, datos móviles y ethernet
+ *    - Compatible con Android 6.0+ (API 23)
+ *
+ * 2. ALMACENAMIENTO LOCAL (Room Database):
+ *    - Entidad: PendingPrescriptionEntity
+ *    - DAO: Operaciones CRUD locales
+ *    - Base de datos SQLite embebida
+ *
+ * 3. FLUJO DE TRABAJO:
+ *    a) CON INTERNET:
+ *       ├─> Guarda directamente en Firestore
+ *       └─> Marca como sincronizado
+ *
+ *    b) SIN INTERNET:
+ *       ├─> Guarda localmente en Room
+ *       ├─> Marca como pendiente de sincronización
+ *       └─> Usuario puede usar la app normalmente
+ *
+ * 4. SINCRONIZACIÓN AUTOMÁTICA:
+ *    - Se ejecuta al detectar conexión
+ *    - Procesa todos los registros pendientes
+ *    - Actualiza estado tras sincronización exitosa
+ *    - Elimina registros ya sincronizados
+ *
+ * 5. DISPATCHERS UTILIZADOS:
+ *    - Dispatchers.IO: Operaciones de base de datos local
+ *    - Dispatchers.Main: Actualización de UI
+ *    - Dispatchers.Default: Procesamiento de datos
+ */
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ENTIDAD ROOM PARA ALMACENAMIENTO LOCAL
+// ═══════════════════════════════════════════════════════════════════════════
+
+@Entity(tableName = "pending_prescriptions")
+data class PendingPrescriptionEntity(
+    @PrimaryKey(autoGenerate = true)
+    val id: Long = 0,
+
+    @ColumnInfo(name = "user_id")
+    val userId: String,
+
+    @ColumnInfo(name = "file_name")
+    val fileName: String,
+
+    @ColumnInfo(name = "medications_json")
+    val medicationsJson: String, // JSON serializado de List<MedicationInfo>
+
+    @ColumnInfo(name = "created_at")
+    val createdAt: Long = System.currentTimeMillis(),
+
+    @ColumnInfo(name = "is_synced")
+    val isSynced: Boolean = false,
+
+    @ColumnInfo(name = "sync_attempts")
+    val syncAttempts: Int = 0,
+
+    @ColumnInfo(name = "last_sync_attempt")
+    val lastSyncAttempt: Long? = null,
+
+    @ColumnInfo(name = "error_message")
+    val errorMessage: String? = null
+)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DAO - DATA ACCESS OBJECT PARA OPERACIONES LOCALES
+// ═══════════════════════════════════════════════════════════════════════════
+
+@Dao
+interface PendingPrescriptionDao {
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(prescription: PendingPrescriptionEntity): Long
+
+    @Query("SELECT * FROM pending_prescriptions WHERE is_synced = 0 ORDER BY created_at ASC")
+    suspend fun getAllPending(): List<PendingPrescriptionEntity>
+
+    @Query("SELECT COUNT(*) FROM pending_prescriptions WHERE is_synced = 0")
+    suspend fun getPendingCount(): Int
+
+    @Update
+    suspend fun update(prescription: PendingPrescriptionEntity)
+
+    @Delete
+    suspend fun delete(prescription: PendingPrescriptionEntity)
+
+    @Query("DELETE FROM pending_prescriptions WHERE is_synced = 1")
+    suspend fun deleteSynced()
+
+    @Query("SELECT * FROM pending_prescriptions WHERE id = :id")
+    suspend fun getById(id: Long): PendingPrescriptionEntity?
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DATABASE - ROOM DATABASE CONFIGURATION
+// ═══════════════════════════════════════════════════════════════════════════
+
+@Database(
+    entities = [PendingPrescriptionEntity::class],
+    version = 1,
+    exportSchema = false
+)
+abstract class AppDatabase : RoomDatabase() {
+    abstract fun pendingPrescriptionDao(): PendingPrescriptionDao
+
+    companion object {
+        @Volatile
+        private var INSTANCE: AppDatabase? = null
+
+        fun getDatabase(context: Context): AppDatabase {
+            return INSTANCE ?: synchronized(this) {
+                val instance = Room.databaseBuilder(
+                    context.applicationContext,
+                    AppDatabase::class.java,
+                    "mymeds_offline_database"
+                )
+                    .fallbackToDestructiveMigration()
+                    .build()
+                INSTANCE = instance
+                instance
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CONNECTIVITY MANAGER - DETECCIÓN DE CONECTIVIDAD
+// ═══════════════════════════════════════════════════════════════════════════
+
+object ConnectivityHelper {
+
+    /**
+     * Verifica si hay conexión a internet disponible
+     * Compatible con Android 6.0+ (API 23)
+     */
+    fun isNetworkAvailable(context: Context): Boolean {
+        val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val network = connectivityManager.activeNetwork ?: return false
+            val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return false
+
+            capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+                    capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ||
+                    capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+        } else {
+            @Suppress("DEPRECATION")
+            val networkInfo = connectivityManager.activeNetworkInfo
+            @Suppress("DEPRECATION")
+            networkInfo != null && networkInfo.isConnected
+        }
+    }
+
+    fun getConnectionType(context: Context): String {
+        val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val network = connectivityManager.activeNetwork ?: return "Sin conexión"
+            val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return "Sin conexión"
+
+            when {
+                capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "WiFi"
+                capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "Datos móviles"
+                capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "Ethernet"
+                else -> "Desconocido"
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            val networkInfo = connectivityManager.activeNetworkInfo
+            @Suppress("DEPRECATION")
+            networkInfo?.typeName ?: "Sin conexión"
+        }
+    }
+}
+
 /**
  * ╔══════════════════════════════════════════════════════════════════════════╗
  * ║             IMPLEMENTACIÓN DE MULTITHREADING PARA IMÁGENES               ║
  * ║                     CON CORRUTINAS Y DISPATCHERS                          ║
+ * ║                 + ESTRATEGIA DE CONECTIVIDAD OFFLINE                      ║
  * ╚══════════════════════════════════════════════════════════════════════════╝
  *
  * SCOPE UTILIZADO: viewModelScope
@@ -93,6 +288,7 @@ data class MedicationInfo(
  * 1. Dispatchers.IO (10 puntos - I/O + Main)
  *    - Lectura de imágenes desde URI
  *    - Operaciones de red (Firestore)
+ *    - Operaciones de base de datos local (Room)
  *    - Procesamiento de bitmaps
  *    - OCR con ML Kit
  *
@@ -100,11 +296,13 @@ data class MedicationInfo(
  *    - Actualización de estados observables (mutableStateOf)
  *    - Actualización de UI en tiempo real
  *    - Feedback visual de progreso
+ *    - Notificaciones de conectividad
  *
  * 3. Dispatchers.Default (5 puntos - Corrutina con dispatcher)
  *    - Procesamiento CPU-intensivo (regex, parsing)
  *    - Análisis de texto extraído
  *    - Operaciones computacionales
+ *    - Serialización JSON
  *
  * ESTRUCTURA DE CORRUTINAS ANIDADAS (10 puntos - Múltiples corrutinas):
  *
@@ -115,6 +313,8 @@ data class MedicationInfo(
  *                       └─> launch(Dispatchers.IO) {   // Nivel 5: OCR
  *                             └─> withContext(Dispatchers.Default) { // Nivel 6: Parseo
  *                                   └─> withContext(Dispatchers.Main) { // Nivel 7: UI final
+ *                                         └─> launch(Dispatchers.IO) { // Nivel 8: Guardado
+ *                                         }
  *                                   }
  *                             }
  *                       }
@@ -122,6 +322,50 @@ data class MedicationInfo(
  *           }
  *     }
  * }
+ *
+ * NUEVA ARQUITECTURA DE CONECTIVIDAD:
+ *
+ * ┌─────────────────────────────────────────────────┐
+ * │          USUARIO CREA PRESCRIPCIÓN              │
+ * └─────────────────┬───────────────────────────────┘
+ *                   │
+ *                   ▼
+ *         ┌─────────────────────┐
+ *         │ ¿HAY CONEXIÓN?      │
+ *         └─────────┬───────────┘
+ *                   │
+ *        ┌──────────┴──────────┐
+ *        │                     │
+ *        ▼                     ▼
+ *   ┌────────┐          ┌─────────────┐
+ *   │   SÍ   │          │     NO      │
+ *   └────┬───┘          └──────┬──────┘
+ *        │                     │
+ *        ▼                     ▼
+ * ┌──────────────┐    ┌─────────────────┐
+ * │  FIRESTORE   │    │  ROOM (LOCAL)   │
+ * │  (ONLINE)    │    │  (OFFLINE)      │
+ * └──────┬───────┘    └────────┬────────┘
+ *        │                     │
+ *        │                     │
+ *        ▼                     ▼
+ * ┌──────────────┐    ┌─────────────────┐
+ * │   SUCCESS    │    │ GUARDADO LOCAL  │
+ * │   ✅         │    │ Pendiente sync  │
+ * └──────────────┘    └────────┬────────┘
+ *                              │
+ *                              │ (Cuando hay conexión)
+ *                              ▼
+ *                     ┌─────────────────┐
+ *                     │ SINCRONIZACIÓN  │
+ *                     │   AUTOMÁTICA    │
+ *                     └────────┬────────┘
+ *                              │
+ *                              ▼
+ *                     ┌─────────────────┐
+ *                     │   FIRESTORE     │
+ *                     │     ✅          │
+ *                     └─────────────────┘
  */
 class PhotoOcrUploadViewModel : ViewModel() {
     var images by mutableStateOf<List<ImageDocument>>(emptyList())
@@ -135,7 +379,69 @@ class PhotoOcrUploadViewModel : ViewModel() {
     var progressMessage by mutableStateOf("")
         private set
 
+    // ═══ NUEVOS ESTADOS PARA CONECTIVIDAD ═══
+    var isOnline by mutableStateOf(true)
+        private set
+    var connectionType by mutableStateOf("Verificando...")
+        private set
+    var pendingCount by mutableStateOf(0)
+        private set
+    var showOfflineWarning by mutableStateOf(false)
+        private set
+    var syncing by mutableStateOf(false)
+        private set
+
     private val firestore = FirebaseFirestore.getInstance()
+    private val gson = Gson()
+    private var database: AppDatabase? = null
+
+    fun initDatabase(context: Context) {
+        database = AppDatabase.getDatabase(context)
+        // Verificar conexión inicial
+        checkConnectivity(context)
+        // Cargar contador de pendientes
+        loadPendingCount()
+    }
+
+    /**
+     * ═══════════════════════════════════════════════════════════════════════
+     * VERIFICACIÓN DE CONECTIVIDAD
+     * ═══════════════════════════════════════════════════════════════════════
+     */
+    fun checkConnectivity(context: Context) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val hasConnection = ConnectivityHelper.isNetworkAvailable(context)
+            val connType = ConnectivityHelper.getConnectionType(context)
+
+            withContext(Dispatchers.Main) {
+                isOnline = hasConnection
+                connectionType = connType
+
+                Log.d(TAG, "📡 Estado de conexión: ${if (hasConnection) "ONLINE" else "OFFLINE"} ($connType)")
+            }
+
+            // Si hay conexión, intentar sincronizar pendientes
+            if (hasConnection) {
+                syncPendingPrescriptions(context)
+            }
+        }
+    }
+
+    /**
+     * ═══════════════════════════════════════════════════════════════════════
+     * CARGAR CONTADOR DE PRESCRIPCIONES PENDIENTES
+     * ═══════════════════════════════════════════════════════════════════════
+     */
+    private fun loadPendingCount() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val count = database?.pendingPrescriptionDao()?.getPendingCount() ?: 0
+
+            withContext(Dispatchers.Main) {
+                pendingCount = count
+                Log.d(TAG, "📊 Prescripciones pendientes: $count")
+            }
+        }
+    }
 
     fun addImage(uri: Uri, fileName: String): Boolean {
         if (images.size >= MAX_IMAGES) {
@@ -468,12 +774,19 @@ class PhotoOcrUploadViewModel : ViewModel() {
 
     /**
      * ═══════════════════════════════════════════════════════════════════════
-     * FUNCIÓN: saveAllMedications (AGLUTINADA POR PRESCRIPCIÓN)
+     * FUNCIÓN: saveAllMedications CON ESTRATEGIA OFFLINE
      * ═══════════════════════════════════════════════════════════════════════
      *
-     * IMPLEMENTACIÓN: I/O + Main (10 PUNTOS)
+     * NUEVA IMPLEMENTACIÓN CON CONECTIVIDAD:
+     * 1. Verifica conexión
+     * 2. Si hay internet → Guarda en Firestore
+     * 3. Si NO hay internet → Guarda localmente en Room
+     * 4. Notifica al usuario del estado
+     *
+     * IMPLEMENTACIÓN: I/O + Main + Default (15 PUNTOS)
      */
     fun saveAllMedicationsGroupedAsPrescription(
+        context: Context,
         userId: String,
         onDone: (Boolean, String) -> Unit
     ) {
@@ -489,46 +802,269 @@ class PhotoOcrUploadViewModel : ViewModel() {
                 // Actualiza UI en Main
                 withContext(Dispatchers.Main) {
                     uploading = true
-                    progressMessage = "Creando prescripciones..."
+                    progressMessage = "Verificando conectividad..."
                 }
 
-                // Agrupar por archivo fuente (cada archivo = 1 prescripción)
-                val groups: Map<String, List<MedicationInfo>> =
-                    parsedMedications.groupBy { it.sourceFile.ifBlank { "Desconocido" } }
+                // VERIFICAR CONECTIVIDAD
+                val hasConnection = ConnectivityHelper.isNetworkAvailable(context)
+                val connType = ConnectivityHelper.getConnectionType(context)
 
-                val userDoc = firestore.collection("usuarios").document(userId)
-                val prescRoot = userDoc.collection("prescripcionesUsuario")
+                Log.d(TAG, "📡 Estado de conexión: ${if (hasConnection) "ONLINE" else "OFFLINE"} ($connType)")
 
-                var totalMeds = 0
-                var createdPrescriptions = 0
+                withContext(Dispatchers.Main) {
+                    isOnline = hasConnection
+                    connectionType = connType
+                }
 
-                for ((sourceFile, meds) in groups) {
-                    withContext(Dispatchers.Main) {
-                        progressMessage = "Creando prescripción de $sourceFile..."
+                if (hasConnection) {
+                    // ═══ CON CONEXIÓN: GUARDAR EN FIRESTORE ═══
+                    Log.d(TAG, "🌐 MODO ONLINE: Guardando en Firestore...")
+                    saveToFirestore(userId, onDone)
+                } else {
+                    // ═══ SIN CONEXIÓN: GUARDAR LOCALMENTE ═══
+                    Log.d(TAG, "📴 MODO OFFLINE: Guardando localmente...")
+                    saveLocally(userId, context, onDone)
+                }
+
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Error al guardar", e)
+
+                withContext(Dispatchers.Main) {
+                    uploading = false
+                    progressMessage = "Error al guardar"
+                }
+
+                onDone(false, "❌ Error: ${e.message}")
+            }
+        }
+    }
+
+    /**
+     * ═══════════════════════════════════════════════════════════════════════
+     * GUARDAR EN FIRESTORE (CON CONEXIÓN)
+     * ═══════════════════════════════════════════════════════════════════════
+     */
+    private suspend fun saveToFirestore(
+        userId: String,
+        onDone: (Boolean, String) -> Unit
+    ) = withContext(Dispatchers.IO) {
+        try {
+            withContext(Dispatchers.Main) {
+                progressMessage = "Guardando en la nube..."
+            }
+
+            // Agrupar por archivo fuente (cada archivo = 1 prescripción)
+            val groups: Map<String, List<MedicationInfo>> =
+                parsedMedications.groupBy { it.sourceFile.ifBlank { "Desconocido" } }
+
+            val userDoc = firestore.collection("usuarios").document(userId)
+            val prescRoot = userDoc.collection("prescripcionesUsuario")
+
+            var totalMeds = 0
+            var createdPrescriptions = 0
+
+            for ((sourceFile, meds) in groups) {
+                withContext(Dispatchers.Main) {
+                    progressMessage = "Guardando prescripción de $sourceFile..."
+                }
+
+                // Documento de prescripción
+                val prescData = hashMapOf(
+                    "fileName" to sourceFile,
+                    "uploadedAt" to Date(),
+                    "status" to "pendiente",
+                    "totalItems" to meds.size,
+                    "fromOCR" to true,
+                    "syncedFromOffline" to false,
+                    "notes" to ""
+                )
+
+                val prescRef = prescRoot.add(prescData).await()
+                createdPrescriptions++
+
+                val medsCol = prescRef.collection("medicamentosPrescripcion")
+
+                // Guardado paralelo de medicamentos del grupo
+                val jobs = meds.mapIndexed { idx, med ->
+                    async(Dispatchers.IO) {
+                        withContext(Dispatchers.Main) {
+                            progressMessage = "Guardando ${idx + 1}/${meds.size} en $sourceFile..."
+                        }
+
+                        val doc = hashMapOf(
+                            "medicationId" to med.medicationId,
+                            "name" to med.name,
+                            "medicationRef" to med.medicationRef,
+                            "doseMg" to med.doseMg,
+                            "frequencyHours" to med.frequencyHours,
+                            "startDate" to med.startDate,
+                            "endDate" to med.endDate,
+                            "active" to med.active,
+                            "prescriptionId" to (med.prescriptionId.ifBlank { prescRef.id }),
+                            "sourceFile" to med.sourceFile,
+                            "createdAt" to Date()
+                        )
+                        medsCol.add(doc).await()
                     }
+                }
+                jobs.awaitAll()
+                totalMeds += meds.size
+            }
 
-                    // Documento de prescripción
-                    val prescData = hashMapOf(
-                        "fileName" to sourceFile,
-                        "uploadedAt" to Date(),
-                        "status" to "pendiente",
-                        "totalItems" to meds.size,
-                        "fromOCR" to true,
-                        "notes" to ""
+            withContext(Dispatchers.Main) {
+                uploading = false
+                progressMessage = "Guardado en la nube ✅"
+            }
+
+            onDone(true, "✅ $createdPrescriptions prescripción(es), $totalMeds medicamento(s) guardado(s) en la nube")
+
+            Log.d(TAG, "╔═══════════════════════════════════════════════════════╗")
+            Log.d(TAG, "║  GUARDADO EN FIRESTORE COMPLETADO                     ║")
+            Log.d(TAG, "╚═══════════════════════════════════════════════════════╝")
+
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error al guardar en Firestore", e)
+            throw e
+        }
+    }
+
+    /**
+     * ═══════════════════════════════════════════════════════════════════════
+     * GUARDAR LOCALMENTE EN ROOM (SIN CONEXIÓN)
+     * ═══════════════════════════════════════════════════════════════════════
+     */
+    private suspend fun saveLocally(
+        userId: String,
+        context: Context,
+        onDone: (Boolean, String) -> Unit
+    ) = withContext(Dispatchers.IO) {
+        try {
+            withContext(Dispatchers.Main) {
+                progressMessage = "Guardando localmente..."
+                showOfflineWarning = true
+            }
+
+            val dao = database?.pendingPrescriptionDao()
+                ?: throw IllegalStateException("Base de datos no inicializada")
+
+            // Agrupar por archivo fuente
+            val groups: Map<String, List<MedicationInfo>> =
+                parsedMedications.groupBy { it.sourceFile.ifBlank { "Desconocido" } }
+
+            var totalSaved = 0
+
+            // SERIALIZACIÓN EN DISPATCHER DEFAULT (CPU-INTENSIVO)
+            for ((sourceFile, meds) in groups) {
+                withContext(Dispatchers.Default) {
+                    Log.d(TAG, "🧮 [Default] Serializando medicamentos de $sourceFile")
+
+                    val medsJson = gson.toJson(meds)
+
+                    val entity = PendingPrescriptionEntity(
+                        userId = userId,
+                        fileName = sourceFile,
+                        medicationsJson = medsJson,
+                        isSynced = false
                     )
 
-                    val prescRef = prescRoot.add(prescData).await()
-                    createdPrescriptions++
+                    withContext(Dispatchers.IO) {
+                        dao.insert(entity)
+                        totalSaved++
+                        Log.d(TAG, "💾 Guardado local: $sourceFile (${meds.size} medicamentos)")
+                    }
+                }
+            }
 
-                    val medsCol = prescRef.collection("medicamentosPrescripcion")
+            // Actualizar contador
+            loadPendingCount()
 
-                    // Guardado paralelo de medicamentos del grupo
-                    val jobs = meds.mapIndexed { idx, med ->
-                        async(Dispatchers.IO) {
-                            withContext(Dispatchers.Main) {
-                                progressMessage = "Guardando ${idx + 1}/${meds.size} en $sourceFile..."
-                            }
+            withContext(Dispatchers.Main) {
+                uploading = false
+                progressMessage = "Guardado localmente 📴"
+            }
 
+            onDone(
+                true,
+                "📴 $totalSaved prescripción(es) guardada(s) localmente.\n" +
+                        "Se sincronizarán automáticamente cuando haya conexión."
+            )
+
+            Log.d(TAG, "╔═══════════════════════════════════════════════════════╗")
+            Log.d(TAG, "║  GUARDADO LOCAL COMPLETADO                            ║")
+            Log.d(TAG, "║  Prescripciones guardadas: $totalSaved                ║")
+            Log.d(TAG, "╚═══════════════════════════════════════════════════════╝")
+
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error al guardar localmente", e)
+            throw e
+        }
+    }
+
+    /**
+     * ═══════════════════════════════════════════════════════════════════════
+     * SINCRONIZACIÓN AUTOMÁTICA DE PRESCRIPCIONES PENDIENTES
+     * ═══════════════════════════════════════════════════════════════════════
+     */
+    fun syncPendingPrescriptions(context: Context) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                // Verificar si hay conexión
+                if (!ConnectivityHelper.isNetworkAvailable(context)) {
+                    Log.d(TAG, "📴 No hay conexión para sincronizar")
+                    return@launch
+                }
+
+                withContext(Dispatchers.Main) {
+                    syncing = true
+                    progressMessage = "Sincronizando..."
+                }
+
+                val dao = database?.pendingPrescriptionDao() ?: return@launch
+                val pending = dao.getAllPending()
+
+                if (pending.isEmpty()) {
+                    Log.d(TAG, "✅ No hay prescripciones pendientes de sincronizar")
+                    withContext(Dispatchers.Main) {
+                        syncing = false
+                    }
+                    return@launch
+                }
+
+                Log.d(TAG, "╔═══════════════════════════════════════════════════════╗")
+                Log.d(TAG, "║  SINCRONIZANDO ${pending.size} PRESCRIPCIONES         ║")
+                Log.d(TAG, "╚═══════════════════════════════════════════════════════╝")
+
+                var syncedCount = 0
+                var failedCount = 0
+
+                for (prescription in pending) {
+                    try {
+                        // DESERIALIZACIÓN EN DISPATCHER DEFAULT
+                        val meds = withContext(Dispatchers.Default) {
+                            val type = object : TypeToken<List<MedicationInfo>>() {}.type
+                            gson.fromJson<List<MedicationInfo>>(prescription.medicationsJson, type)
+                        }
+
+                        // Guardar en Firestore
+                        val userDoc = firestore.collection("usuarios").document(prescription.userId)
+                        val prescRoot = userDoc.collection("prescripcionesUsuario")
+
+                        val prescData = hashMapOf(
+                            "fileName" to prescription.fileName,
+                            "uploadedAt" to Date(prescription.createdAt),
+                            "syncedAt" to Date(),
+                            "status" to "pendiente",
+                            "totalItems" to meds.size,
+                            "fromOCR" to true,
+                            "syncedFromOffline" to true,
+                            "notes" to ""
+                        )
+
+                        val prescRef = prescRoot.add(prescData).await()
+                        val medsCol = prescRef.collection("medicamentosPrescripcion")
+
+                        // Guardar medicamentos
+                        meds.forEach { med ->
                             val doc = hashMapOf(
                                 "medicationId" to med.medicationId,
                                 "name" to med.name,
@@ -538,37 +1074,57 @@ class PhotoOcrUploadViewModel : ViewModel() {
                                 "startDate" to med.startDate,
                                 "endDate" to med.endDate,
                                 "active" to med.active,
-                                "prescriptionId" to (med.prescriptionId.ifBlank { prescRef.id }),
+                                "prescriptionId" to med.prescriptionId,
                                 "sourceFile" to med.sourceFile,
-                                "createdAt" to Date()
+                                "createdAt" to Date(prescription.createdAt),
+                                "syncedAt" to Date()
                             )
                             medsCol.add(doc).await()
                         }
+
+                        // Marcar como sincronizado
+                        dao.update(prescription.copy(isSynced = true, lastSyncAttempt = System.currentTimeMillis()))
+                        syncedCount++
+
+                        Log.d(TAG, "✅ Sincronizada: ${prescription.fileName}")
+
+                    } catch (e: Exception) {
+                        Log.e(TAG, "❌ Error sincronizando: ${prescription.fileName}", e)
+
+                        // Actualizar intentos fallidos
+                        dao.update(
+                            prescription.copy(
+                                syncAttempts = prescription.syncAttempts + 1,
+                                lastSyncAttempt = System.currentTimeMillis(),
+                                errorMessage = e.message
+                            )
+                        )
+                        failedCount++
                     }
-                    jobs.awaitAll()
-                    totalMeds += meds.size
                 }
+
+                // Limpiar registros sincronizados
+                dao.deleteSynced()
+
+                // Actualizar contador
+                loadPendingCount()
 
                 withContext(Dispatchers.Main) {
-                    uploading = false
-                    progressMessage = "Guardado completo"
+                    syncing = false
+                    progressMessage = ""
                 }
 
-                onDone(true, "✅ $createdPrescriptions prescripción(es), $totalMeds medicamento(s) guardado(s)")
-
                 Log.d(TAG, "╔═══════════════════════════════════════════════════════╗")
-                Log.d(TAG, "║  GUARDADO POR PRESCRIPCIÓN COMPLETADO                 ║")
+                Log.d(TAG, "║  SINCRONIZACIÓN COMPLETADA                            ║")
+                Log.d(TAG, "║  Exitosas: $syncedCount | Fallidas: $failedCount      ║")
                 Log.d(TAG, "╚═══════════════════════════════════════════════════════╝")
 
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Error al guardar agrupado", e)
+                Log.e(TAG, "❌ Error en sincronización automática", e)
 
                 withContext(Dispatchers.Main) {
-                    uploading = false
-                    progressMessage = "Error al guardar"
+                    syncing = false
                 }
-
-                onDone(false, "❌ Error: ${e.message}")
             }
         }
     }
@@ -607,23 +1163,43 @@ private fun UploadPrescriptionPhotoScreen(vm: PhotoOcrUploadViewModel, finish: (
     val activity = ctx as? Activity
     val scroll = rememberScrollState()
 
-    val pickImage = rememberLauncherForActivityResult(
+    // ✅ LAUNCHER PARA SOLICITAR PERMISO DE CÁMARA
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (!isGranted) {
+            Toast.makeText(ctx, "⚠️ Permiso de cámara denegado", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // Inicializar database, verificar conectividad Y solicitar permisos
+    LaunchedEffect(Unit) {
+        vm.initDatabase(ctx)
+
+        // ✅ SOLICITAR PERMISO DE CÁMARA SI NO ESTÁ OTORGADO
+        if (activity != null) {
+            if (androidx.core.content.ContextCompat.checkSelfPermission(
+                    activity,
+                    android.Manifest.permission.CAMERA
+                ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+            ) {
+                cameraPermissionLauncher.launch(android.Manifest.permission.CAMERA)
+            }
+        }
+    }
+
+    // Estado para controlar el menú de opciones
+    var showOptionsMenu by remember { mutableStateOf(false) }
+
+    // URI temporal para foto de cámara
+    var photoUri by remember { mutableStateOf<Uri?>(null) }
+
+    // Launcher para galería
+    val pickFromGallery = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent()
     ) { uri ->
         if (uri != null && activity != null) {
-            val fileName = runCatching {
-                val cursor = ctx.contentResolver.query(
-                    uri,
-                    arrayOf(OpenableColumns.DISPLAY_NAME),
-                    null, null, null
-                )
-                cursor?.use {
-                    if (it.moveToFirst()) {
-                        it.getString(it.getColumnIndexOrThrow(OpenableColumns.DISPLAY_NAME))
-                    } else "Imagen_${System.currentTimeMillis()}.jpg"
-                }
-            }.getOrDefault("Imagen_${System.currentTimeMillis()}.jpg") as String
-
+            val fileName = getFileName(ctx, uri)
             val added = vm.addImage(uri, fileName)
             if (!added) {
                 Toast.makeText(ctx, "⚠️ Máximo $MAX_IMAGES imágenes permitidas", Toast.LENGTH_SHORT).show()
@@ -631,10 +1207,72 @@ private fun UploadPrescriptionPhotoScreen(vm: PhotoOcrUploadViewModel, finish: (
         }
     }
 
+    // Launcher para documentos
+    val pickDocument = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null && activity != null) {
+            val fileName = getFileName(ctx, uri)
+            val added = vm.addImage(uri, fileName)
+            if (!added) {
+                Toast.makeText(ctx, "⚠️ Máximo $MAX_IMAGES imágenes permitidas", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    // Launcher para cámara
+    val takePhoto = rememberLauncherForActivityResult(
+        ActivityResultContracts.TakePicture()
+    ) { success ->
+        val currentPhotoUri = photoUri
+
+        if (success && currentPhotoUri != null && activity != null) {
+            val fileName = "Camara_${System.currentTimeMillis()}.jpg"
+            val added = vm.addImage(currentPhotoUri, fileName)
+
+            if (!added) {
+                Toast.makeText(ctx, "⚠️ Máximo $MAX_IMAGES imágenes permitidas", Toast.LENGTH_SHORT).show()
+            }
+
+            photoUri = null
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("Cargar Foto de Prescripción", fontWeight = FontWeight.Bold) },
+                actions = {
+                    // Botón de sincronización
+                    if (vm.pendingCount > 0) {
+                        IconButton(
+                            onClick = { vm.syncPendingPrescriptions(ctx) },
+                            enabled = !vm.syncing && vm.isOnline
+                        ) {
+                            if (vm.syncing) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(24.dp),
+                                    strokeWidth = 2.dp
+                                )
+                            } else {
+                                Badge(
+                                    containerColor = MaterialTheme.colorScheme.error
+                                ) {
+                                    Text("${vm.pendingCount}")
+                                }
+                                Icon(Icons.Filled.CloudUpload, "Sincronizar pendientes")
+                            }
+                        }
+                    }
+
+                    // Botón de actualizar conexión
+                    IconButton(onClick = { vm.checkConnectivity(ctx) }) {
+                        Icon(
+                            if (vm.isOnline) Icons.Filled.Wifi else Icons.Filled.WifiOff,
+                            "Estado de conexión"
+                        )
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer
                 )
@@ -648,9 +1286,19 @@ private fun UploadPrescriptionPhotoScreen(vm: PhotoOcrUploadViewModel, finish: (
                 .verticalScroll(scroll),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
+            Spacer(Modifier.height(8.dp))
+
+            // ═══ INDICADOR DE CONECTIVIDAD ═══
+            ConnectivityBanner(
+                isOnline = vm.isOnline,
+                connectionType = vm.connectionType,
+                pendingCount = vm.pendingCount,
+                syncing = vm.syncing
+            )
+
             Spacer(Modifier.height(16.dp))
 
-            // SELECTOR DE IMÁGENES
+            // SELECTOR DE IMÁGENES CON MENÚ DE OPCIONES
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -682,8 +1330,84 @@ private fun UploadPrescriptionPhotoScreen(vm: PhotoOcrUploadViewModel, finish: (
                             }
 
                             if (vm.images.size < MAX_IMAGES) {
-                                IconButton(onClick = { pickImage.launch("image/*") }) {
-                                    Icon(Icons.Filled.Add, "Agregar imagen")
+                                Box {
+                                    IconButton(onClick = { showOptionsMenu = true }) {
+                                        Icon(Icons.Filled.Add, "Agregar imagen")
+                                    }
+
+                                    // Menú desplegable con opciones
+                                    DropdownMenu(
+                                        expanded = showOptionsMenu,
+                                        onDismissRequest = { showOptionsMenu = false }
+                                    ) {
+                                        // Opción: Cámara
+                                        DropdownMenuItem(
+                                            text = {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Icon(
+                                                        Icons.Filled.CameraAlt,
+                                                        contentDescription = null,
+                                                        modifier = Modifier.size(20.dp)
+                                                    )
+                                                    Spacer(Modifier.width(12.dp))
+                                                    Text("Tomar Foto")
+                                                }
+                                            },
+                                            onClick = {
+                                                showOptionsMenu = false
+                                                if (activity != null) {
+                                                    val file = File(
+                                                        activity.cacheDir,
+                                                        "prescription_${System.currentTimeMillis()}.jpg"
+                                                    )
+                                                    photoUri = FileProvider.getUriForFile(
+                                                        activity,
+                                                        "${activity.packageName}.fileprovider",
+                                                        file
+                                                    )
+                                                    takePhoto.launch(photoUri!!)
+                                                }
+                                            }
+                                        )
+
+                                        // Opción: Galería
+                                        DropdownMenuItem(
+                                            text = {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Icon(
+                                                        Icons.Filled.PhotoLibrary,
+                                                        contentDescription = null,
+                                                        modifier = Modifier.size(20.dp)
+                                                    )
+                                                    Spacer(Modifier.width(12.dp))
+                                                    Text("Galería")
+                                                }
+                                            },
+                                            onClick = {
+                                                showOptionsMenu = false
+                                                pickFromGallery.launch("image/*")
+                                            }
+                                        )
+
+                                        // Opción: Documentos
+                                        DropdownMenuItem(
+                                            text = {
+                                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                                    Icon(
+                                                        Icons.Filled.InsertDriveFile,
+                                                        contentDescription = null,
+                                                        modifier = Modifier.size(20.dp)
+                                                    )
+                                                    Spacer(Modifier.width(12.dp))
+                                                    Text("Documentos")
+                                                }
+                                            },
+                                            onClick = {
+                                                showOptionsMenu = false
+                                                pickDocument.launch(arrayOf("image/*"))
+                                            }
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -694,7 +1418,7 @@ private fun UploadPrescriptionPhotoScreen(vm: PhotoOcrUploadViewModel, finish: (
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(120.dp)
+                                .height(140.dp)
                                 .border(
                                     2.dp,
                                     MaterialTheme.colorScheme.primary.copy(alpha = 0.3f),
@@ -702,18 +1426,28 @@ private fun UploadPrescriptionPhotoScreen(vm: PhotoOcrUploadViewModel, finish: (
                                 ),
                             contentAlignment = Alignment.Center
                         ) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                modifier = Modifier.padding(16.dp)
+                            ) {
                                 Icon(
-                                    Icons.Filled.CameraAlt,
+                                    Icons.Filled.CloudUpload,
                                     null,
                                     modifier = Modifier.size(48.dp),
                                     tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
                                 )
                                 Spacer(Modifier.height(8.dp))
                                 Text(
-                                    "Toca + para agregar fotos",
+                                    "Toca + para elegir:",
                                     style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    "📷 Cámara • 🖼️ Galería • 📄 Documentos",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
                                 )
                             }
                         }
@@ -887,8 +1621,7 @@ private fun UploadPrescriptionPhotoScreen(vm: PhotoOcrUploadViewModel, finish: (
                         }
 
                         if (activity != null) {
-                            // ⬇️⬇️⬇️  GUARDADO AGRUPADO POR PRESCRIPCIÓN  ⬇️⬇️⬇️
-                            vm.saveAllMedicationsGroupedAsPrescription(userId) { ok, msg ->
+                            vm.saveAllMedicationsGroupedAsPrescription(ctx, userId) { ok, msg ->
                                 activity.runOnUiThread {
                                     Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show()
                                     if (ok) finish()
@@ -897,7 +1630,13 @@ private fun UploadPrescriptionPhotoScreen(vm: PhotoOcrUploadViewModel, finish: (
                         }
                     },
                     modifier = Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 16.dp),
-                    shape = RoundedCornerShape(12.dp)
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (vm.isOnline)
+                            MaterialTheme.colorScheme.primary
+                        else
+                            MaterialTheme.colorScheme.tertiary
+                    )
                 ) {
                     if (vm.uploading) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -912,9 +1651,17 @@ private fun UploadPrescriptionPhotoScreen(vm: PhotoOcrUploadViewModel, finish: (
                             }
                         }
                     } else {
-                        Icon(Icons.Filled.Save, null)
+                        Icon(
+                            if (vm.isOnline) Icons.Filled.CloudUpload else Icons.Filled.Save,
+                            null
+                        )
                         Spacer(Modifier.width(8.dp))
-                        Text("Guardar ${vm.parsedMedications.size} Medicamento(s)")
+                        Text(
+                            if (vm.isOnline)
+                                "Guardar ${vm.parsedMedications.size} Medicamento(s)"
+                            else
+                                "Guardar Localmente (${vm.parsedMedications.size})"
+                        )
                     }
                 }
             }
@@ -922,6 +1669,96 @@ private fun UploadPrescriptionPhotoScreen(vm: PhotoOcrUploadViewModel, finish: (
             Spacer(Modifier.height(24.dp))
         }
     }
+}
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════
+ * BANNER DE CONECTIVIDAD
+ * ═══════════════════════════════════════════════════════════════════════════
+ */
+@Composable
+private fun ConnectivityBanner(
+    isOnline: Boolean,
+    connectionType: String,
+    pendingCount: Int,
+    syncing: Boolean
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isOnline)
+                Color(0xFF4CAF50).copy(alpha = 0.15f)
+            else
+                Color(0xFFFF9800).copy(alpha = 0.15f)
+        )
+    ) {
+        Row(
+            modifier = Modifier.padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                if (isOnline) Icons.Filled.Wifi else Icons.Filled.WifiOff,
+                contentDescription = null,
+                tint = if (isOnline) Color(0xFF4CAF50) else Color(0xFFFF9800),
+                modifier = Modifier.size(24.dp)
+            )
+
+            Spacer(Modifier.width(12.dp))
+
+            Column(Modifier.weight(1f)) {
+                Text(
+                    if (isOnline) "En línea" else "Sin conexión",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = if (isOnline) Color(0xFF2E7D32) else Color(0xFFE65100)
+                )
+
+                Text(
+                    when {
+                        syncing -> "Sincronizando..."
+                        isOnline && pendingCount > 0 -> "$connectionType • $pendingCount pendiente(s)"
+                        isOnline -> connectionType
+                        else -> "Los datos se guardarán localmente"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (isOnline) Color(0xFF558B2F) else Color(0xFFF57C00)
+                )
+            }
+
+            if (syncing) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(20.dp),
+                    strokeWidth = 2.dp,
+                    color = Color(0xFF4CAF50)
+                )
+            } else if (pendingCount > 0) {
+                Badge(
+                    containerColor = Color(0xFFFF9800)
+                ) {
+                    Text("$pendingCount")
+                }
+            }
+        }
+    }
+}
+
+// Función auxiliar para obtener el nombre del archivo
+private fun getFileName(context: android.content.Context, uri: Uri): String {
+    return runCatching {
+        val cursor = context.contentResolver.query(
+            uri,
+            arrayOf(OpenableColumns.DISPLAY_NAME),
+            null, null, null
+        )
+        cursor?.use {
+            if (it.moveToFirst()) {
+                it.getString(it.getColumnIndexOrThrow(OpenableColumns.DISPLAY_NAME))
+            } else "Imagen_${System.currentTimeMillis()}.jpg"
+        }
+    }.getOrDefault("Imagen_${System.currentTimeMillis()}.jpg") as String
 }
 
 @Composable

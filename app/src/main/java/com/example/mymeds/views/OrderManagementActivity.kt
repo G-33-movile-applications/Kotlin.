@@ -237,6 +237,9 @@ class EnhancedOrdersViewModel(
                 _uiState.value = OrderUiState.Error(e.message ?: "Error desconocido")
             }
         }
+    } catch (e: Exception) {
+        Log.e(TAG, "❌ [Draft] Error leyendo $path", e)
+        null
     }
 
     @RequiresApi(Build.VERSION_CODES.O)
@@ -529,6 +532,7 @@ class EnhancedOrdersViewModel(
         if (currentCart.isEmpty()) {
             onError("El carrito está vacío"); return
         }
+    }
 
         viewModelScope.launch {
             try {

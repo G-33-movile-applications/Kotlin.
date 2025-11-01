@@ -1,11 +1,15 @@
 package com.example.mymeds.views
 
 import android.app.Activity
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -30,6 +34,17 @@ class RegisterActivity : ComponentActivity() {
         setContent { RegisterScreen(registerViewModel) }
     }
 }
+
+/** Helper de conectividad (Wi-Fi / Celular / Ethernet). */
+private fun isOnline(context: Context): Boolean {
+    val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+    val network = cm.activeNetwork ?: return false
+    val caps = cm.getNetworkCapabilities(network) ?: return false
+    return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ||
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RegisterScreen(viewModel: RegisterViewModel = viewModel()) {
@@ -54,7 +69,7 @@ fun RegisterScreen(viewModel: RegisterViewModel = viewModel()) {
     var isSubmitting by remember { mutableStateOf(false) }
     var submitAttempted by remember { mutableStateOf(false) }
 
-    // "Touched" por campo (marcamos cuando el usuario EDITA el campo)
+    // "Touched" por campo
     var touchedFullName by remember { mutableStateOf(false) }
     var touchedEmail by remember { mutableStateOf(false) }
     var touchedPassword by remember { mutableStateOf(false) }
@@ -70,7 +85,7 @@ fun RegisterScreen(viewModel: RegisterViewModel = viewModel()) {
         )
     }
 
-    // Revalidar en cada cambio (pero solo mostramos error si touched o submitAttempted)
+    // Revalidar en cada cambio
     LaunchedEffect(fullName, email, password, phoneNumber, address, city, department, zipCode) {
         revalidate()
     }
@@ -78,7 +93,12 @@ fun RegisterScreen(viewModel: RegisterViewModel = viewModel()) {
     fun showError(err: String?, touched: Boolean): Boolean =
         err != null && (touched || submitAttempted)
 
+    // Estado de conectividad (evaluado en cada recomposición)
+    val online = isOnline(context)
+
+    // Reglas del botón: formulario válido + no enviando + online
     val formValid = errors.isClean() && acceptTerms && acceptDataPolicy && !isSubmitting
+    val canSubmit = formValid && online
 
     Column(
         modifier = Modifier
@@ -87,6 +107,24 @@ fun RegisterScreen(viewModel: RegisterViewModel = viewModel()) {
             .verticalScroll(rememberScrollState()),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
+        // Banner de conectividad (idéntico patrón al login)
+        if (!online) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFFFFE6E6))
+                    .padding(12.dp)
+            ) {
+                // Si quieres el MISMO texto del login, cambia esta línea:
+                // "Sin conexión. Inicia sesión cuando vuelva el internet."
+                Text(
+                    text = "Sin conexión. Completa el registro cuando vuelva el internet.",
+                    color = Color(0xFF8A0000)
+                )
+            }
+            Spacer(Modifier.height(12.dp))
+        }
+
         Text(
             text = "REGISTER",
             style = MaterialTheme.typography.headlineLarge,
@@ -134,7 +172,7 @@ fun RegisterScreen(viewModel: RegisterViewModel = viewModel()) {
             modifier = Modifier.fillMaxWidth()
         )
 
-        // City (solo letras/espacios)
+        // City
         OutlinedTextField(
             value = city,
             onValueChange = { city = it; touchedCity = true },
@@ -144,7 +182,7 @@ fun RegisterScreen(viewModel: RegisterViewModel = viewModel()) {
             modifier = Modifier.fillMaxWidth()
         )
 
-        // Department (solo letras/espacios)
+        // Department
         OutlinedTextField(
             value = department,
             onValueChange = { department = it; touchedDepartment = true },
@@ -154,7 +192,7 @@ fun RegisterScreen(viewModel: RegisterViewModel = viewModel()) {
             modifier = Modifier.fillMaxWidth()
         )
 
-        // Zip (solo dígitos)
+        // Zip
         OutlinedTextField(
             value = zipCode,
             onValueChange = { zipCode = it; touchedZip = true },
@@ -164,7 +202,7 @@ fun RegisterScreen(viewModel: RegisterViewModel = viewModel()) {
             modifier = Modifier.fillMaxWidth()
         )
 
-        // Password (símbolos permitidos, sin espacios)
+        // Password
         OutlinedTextField(
             value = password,
             onValueChange = { password = it; touchedPassword = true },
@@ -190,6 +228,14 @@ fun RegisterScreen(viewModel: RegisterViewModel = viewModel()) {
 
         Button(
             onClick = {
+                // Igual que login: bloquear si no hay internet y avisar
+                if (!isOnline(context)) {
+                    // Si prefieres EXACTAMENTE el mismo texto del login, usa esta línea:
+                    // Toast.makeText(context, "Sin conexión. Inicia sesión cuando vuelva el internet.", Toast.LENGTH_LONG).show()
+                    Toast.makeText(context, "Sin conexión. Completa el registro cuando vuelva el internet.", Toast.LENGTH_LONG).show()
+                    return@Button
+                }
+
                 submitAttempted = true
                 if (!errors.isClean()) return@Button
                 isSubmitting = true
@@ -203,7 +249,7 @@ fun RegisterScreen(viewModel: RegisterViewModel = viewModel()) {
                     if (success) (context as? Activity)?.finish()
                 }
             },
-            enabled = formValid,
+            enabled = canSubmit, // 🔒 Deshabilitado si falta validación o no hay red
             modifier = Modifier.fillMaxWidth()
         ) {
             if (isSubmitting) CircularProgressIndicator(strokeWidth = 2.dp) else Text("Register")

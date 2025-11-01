@@ -1,12 +1,16 @@
 package com.example.mymeds.views
 
+import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -42,7 +46,7 @@ class LoginActivity : ComponentActivity() {
                 // 🔁 sesión válida → ir a Home y terminar LoginActivity
                 startActivity(Intent(this@LoginActivity, HomeActivity::class.java))
                 finish()
-                return@launch    // 👈 evita ejecutar setContent
+                return@launch
             }
 
             // ⬇️ solo pintamos la UI si NO hay autologin
@@ -73,6 +77,15 @@ class LoginActivity : ComponentActivity() {
     }
 }
 
+/** Helper para verificar conectividad activa (Wi-Fi / Celular / Ethernet). */
+private fun isOnline(context: Context): Boolean {
+    val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+    val network = cm.activeNetwork ?: return false
+    val caps = cm.getNetworkCapabilities(network) ?: return false
+    return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ||
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+}
 
 @Composable
 fun LoginScreen(
@@ -86,6 +99,9 @@ fun LoginScreen(
     val context = LocalContext.current
     val primaryButtonColor = Color(0xFF1A2247)
 
+    // Se evalúa en cada recomposición (suficiente para este caso).
+    val online = isOnline(context)
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -93,6 +109,23 @@ fun LoginScreen(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Top
     ) {
+        // Banner de conectividad
+        if (!online) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFFFFE6E6))
+                    .padding(12.dp)
+            ) {
+                Text(
+                    text = "Sin conexión. Inicia sesión cuando vuelva el internet.",
+                    color = Color(0xFF8A0000),
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+        }
+
         Image(
             painter = painterResource(id = R.mipmap.ic_launcher_foreground),
             contentDescription = "App Logo",
@@ -121,7 +154,6 @@ fun LoginScreen(
             modifier = Modifier.fillMaxWidth()
         )
 
-        // ✅ Casilla “Mantener sesión por 7 días”
         Spacer(modifier = Modifier.height(8.dp))
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -147,12 +179,22 @@ fun LoginScreen(
 
         Button(
             onClick = {
+                // ❌ Bloquear login sin internet y mostrar el mensaje requerido.
+                if (!isOnline(context)) {
+                    onShowMessage("Sin conexión. Inicia sesión cuando vuelva el internet.")
+                    return@Button
+                }
                 viewModel.login(email, password) { success, message ->
-                    onShowMessage(message ?: "Operación completada") // <- convierte String? a String
+                    onShowMessage(message ?: "Operación completada")
                     if (success) onLoginSuccess(keepSignedIn)
                 }
             },
-            colors = ButtonDefaults.buttonColors(containerColor = primaryButtonColor),
+            enabled = online, // 🔒 Deshabilitado cuando no hay internet
+            colors = ButtonDefaults.buttonColors(
+                containerColor = primaryButtonColor,
+                disabledContainerColor = primaryButtonColor.copy(alpha = 0.4f),
+                disabledContentColor = Color.White.copy(alpha = 0.8f)
+            ),
             modifier = Modifier
                 .fillMaxWidth()
                 .height(50.dp),
@@ -160,7 +202,6 @@ fun LoginScreen(
         ) {
             Text("LOGIN", color = Color.White, fontWeight = FontWeight.Bold)
         }
-
 
         Spacer(modifier = Modifier.height(48.dp))
 

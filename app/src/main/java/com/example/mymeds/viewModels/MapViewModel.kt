@@ -5,7 +5,7 @@ import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.mymeds.data.PhysicalPointsRepository
+import com.example.mymeds.repository.PhysicalPointsRepository
 import com.example.mymeds.models.PhysicalPoint
 import com.example.mymeds.utils.LocationUtils
 import com.google.android.gms.maps.model.LatLng

@@ -35,7 +35,10 @@ data class UserAnalytics(
     val mostFrequentPharmacy: String = "",
     val activeOrders: Int = 0,
     val completedOrders: Int = 0,
-    val cancelledOrders: Int = 0
+    val cancelledOrders: Int = 0,
+
+    // BQT4 - Time of the month when refills are most requested
+    val refillsByDayOfMonth: List<Pair<Int, Int>> = emptyList()
 )
 
 /**

@@ -71,6 +71,9 @@ class UserAnalyticsRepository(
             // 6) Extra
             val additionalStats = calculateAdditionalStats(analyticOrders)
 
+            // BQT4: día del mes que se hizo más refill
+            val refillsByDay = calculateRefillsByDay(analyticOrders)
+
             UserAnalytics(
                 // pedidos
                 totalOrders = analyticOrders.size,
@@ -95,7 +98,10 @@ class UserAnalyticsRepository(
                 mostFrequentPharmacy = additionalStats.mostFrequentPharmacy,
                 activeOrders = additionalStats.activeOrders,
                 completedOrders = additionalStats.completedOrders,
-                cancelledOrders = additionalStats.cancelledOrders
+                cancelledOrders = additionalStats.cancelledOrders,
+
+                // BQT4
+                refillsByDayOfMonth = refillsByDay
             )
         } catch (e: Exception) {
             Log.e(TAG, "Error calculando analíticas", e)
@@ -203,6 +209,21 @@ class UserAnalyticsRepository(
             completedOrders = completedOrders,
             cancelledOrders = cancelledOrders
         )
+    }
+
+
+    // ───────────────────────────────────────────────────────────────────────
+    // BQT4: Qué días del mes se hicieron más refill
+    // ───────────────────────────────────────────────────────────────────────
+    private fun calculateRefillsByDay(orders: List<OrderAnalytics>): List<Pair<Int, Int>> {
+        return orders.mapNotNull { it.orderDate }
+            .groupBy { date ->
+                val calendar = java.util.Calendar.getInstance()
+                calendar.time = date
+                calendar.get(java.util.Calendar.DAY_OF_MONTH)
+            }
+            .map { (day, dates) -> Pair(day, dates.size) }
+            .sortedBy { it.first }
     }
 
     // ───────────────────────────────────────────────────────────────────────

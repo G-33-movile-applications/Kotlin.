@@ -1,15 +1,17 @@
 package com.example.mymeds.views
 
 import android.content.ActivityNotFoundException
+import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.result.launch
 import androidx.activity.viewModels
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -42,7 +44,7 @@ data class UserPrescription(
     val uploadedAt: Timestamp? = null,
     val status: String = "pendiente",
     val notes: String = "",
-    val activa: Boolean = false,
+    val activa: Boolean = true,      // default true
     val diagnostico: String = "",
     val medico: String = "",
     val totalItems: Int = 0,
@@ -77,24 +79,31 @@ class PrescriptionsRepository(
 
         return ref.addSnapshotListener { snap, e ->
             if (e != null) {
-                onError(e)
-                return@addSnapshotListener
+                onError(e); return@addSnapshotListener
             }
+
             val list = snap?.documents?.map { doc ->
+                // backfill: si no existe "activa", lo seteamos a true
+                val activaValue = doc.getBoolean("activa")
+                if (activaValue == null) {
+                    doc.reference.update("activa", true)
+                }
+
                 UserPrescription(
                     id = doc.id,
-                    fileName = doc.getString("fileName") ?: doc.getString("nombreArchivo") ?: "Archivo",
-                    fileUrl = doc.getString("fileUrl") ?: doc.getString("url") ?: "",
-                    uploadedAt = doc.getTimestamp("uploadedAt") ?: doc.getTimestamp("fechaSubida"),
-                    status = doc.getString("status") ?: "pendiente",
-                    notes = doc.getString("notes") ?: doc.getString("comentarios") ?: "",
-                    activa = doc.getBoolean("activa") ?: false,
-                    diagnostico = doc.getString("diagnostico") ?: "",
-                    medico = doc.getString("medico") ?: "",
-                    totalItems = doc.getLong("totalItems")?.toInt() ?: 0,
-                    fromOCR = doc.getBoolean("fromOCR") ?: false
+                    fileName     = doc.getString("fileName") ?: doc.getString("nombreArchivo") ?: "Archivo",
+                    fileUrl      = doc.getString("fileUrl") ?: doc.getString("url") ?: "",
+                    uploadedAt   = doc.getTimestamp("uploadedAt") ?: doc.getTimestamp("fechaSubida"),
+                    status       = doc.getString("status") ?: "pendiente",
+                    notes        = doc.getString("notes")  ?: doc.getString("comentarios") ?: "",
+                    activa       = activaValue ?: true,  // default true si no está
+                    diagnostico  = doc.getString("diagnostico") ?: "",
+                    medico       = doc.getString("medico") ?: "",
+                    totalItems   = doc.getLong("totalItems")?.toInt() ?: 0,
+                    fromOCR      = doc.getBoolean("fromOCR") ?: false
                 )
             } ?: emptyList()
+
             onData(list)
         }
     }
@@ -147,6 +156,31 @@ class PrescriptionsRepository(
             false
         }
     }
+
+    /** Elimina la prescripción y sus medicamentos de la subcolección */
+    suspend fun deletePrescription(
+        userId: String,
+        prescriptionId: String
+    ): Boolean {
+        return try {
+            val prescRef = db.collection("usuarios")
+                .document(userId)
+                .collection("prescripcionesUsuario")
+                .document(prescriptionId)
+
+            // borrar subcolección medicamentos (en lote seguro)
+            val medsSnap = prescRef.collection("medicamentosPrescripcion").get().await()
+            val batch = db.batch()
+            medsSnap.documents.forEach { batch.delete(it.reference) }
+            batch.commit().await()
+
+            // borrar documento padre
+            prescRef.delete().await()
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
 }
 
 // ======== UI State ========
@@ -154,13 +188,6 @@ sealed class PrescriptionsUiState {
     object Loading : PrescriptionsUiState()
     data class Success(val items: List<UserPrescription>) : PrescriptionsUiState()
     data class Error(val message: String) : PrescriptionsUiState()
-}
-
-private fun PrescriptionsViewModel.togglePrescriptionStatus(
-    userId: Any,
-    prescriptionId: String,
-    newStatus: Boolean
-) {
 }
 
 // ======== ViewModel ========
@@ -200,64 +227,63 @@ class PrescriptionsViewModel : androidx.lifecycle.ViewModel() {
     fun refresh() = start()
 
     fun togglePrescriptionExpansion(prescriptionId: String) {
-        // Si la prescripción ya está expandida, la colapsamos.
         if (_expandedPrescription.value == prescriptionId) {
             _expandedPrescription.value = null
         } else {
-            // Si no, la expandimos.
             _expandedPrescription.value = prescriptionId
-            // ✅ CORRECCIÓN: Lanzamos una corrutina para llamar a la función suspend.
-            viewModelScope.launch {
-                loadPrescriptionMedications(prescriptionId)
-            }
+            viewModelScope.launch { loadPrescriptionMedications(prescriptionId) }
         }
     }
 
     private suspend fun loadPrescriptionMedications(prescriptionId: String) {
         val uid = auth.currentUser?.uid ?: return
-
-        // ... código para evitar recargas ...
+        if (_prescriptionMedications.value.containsKey(prescriptionId)) return
 
         _loadingMedications.value = _loadingMedications.value + prescriptionId
-
-        // ❌ ERROR AQUÍ: Estás llamando a una función suspend fuera de una corrutina
         val medications = repo.getPrescriptionMedications(uid, prescriptionId)
         _prescriptionMedications.value = _prescriptionMedications.value + (prescriptionId to medications)
-
         _loadingMedications.value = _loadingMedications.value - prescriptionId
     }
 
-    // Dentro de PrescriptionsViewModel
-
     fun togglePrescriptionActive(prescriptionId: String, currentStatus: Boolean) {
         viewModelScope.launch {
-            try {
-                // ✅ Llamamos a la función `suspend` del repositorio.
-                val success = repo.togglePrescriptionStatus(
-                    userId = auth.currentUser?.uid ?: return@launch,
-                    prescriptionId = prescriptionId,
-                    newStatus = !currentStatus
-                )
-
-                // ✅ CORRECCIÓN: Usamos la variable 'success' como condición.
-                if (success) {
-                    // Si la operación fue exitosa, llamamos a refresh() como una acción.
-                    refresh()
-                } else {
-                    // Aquí puedes manejar el caso en que la actualización falló,
-                    // por ejemplo, mostrando un mensaje al usuario.
-                }
-            } catch (e: Exception) {
-                // Manejar la excepción (mostrar un Toast, log, etc.)
-            }
+            val uid = auth.currentUser?.uid ?: return@launch
+            val success = repo.togglePrescriptionStatus(uid, prescriptionId, !currentStatus)
+            if (success) refresh()
         }
     }
 
+    fun deletePrescription(prescriptionId: String, onResult: (Boolean) -> Unit) {
+        viewModelScope.launch {
+            val uid = auth.currentUser?.uid ?: return@launch
+            val ok = repo.deletePrescription(uid, prescriptionId)
+            if (ok) {
+                // limpiar caché de medicamentos por si estaba expandida
+                _prescriptionMedications.value =
+                    _prescriptionMedications.value - prescriptionId
+                if (_expandedPrescription.value == prescriptionId) {
+                    _expandedPrescription.value = null
+                }
+                refresh()
+            }
+            onResult(ok)
+        }
+    }
 
     override fun onCleared() {
         super.onCleared()
         registration?.remove()
     }
+}
+
+// ======== Helpers de conectividad ========
+private fun Context.isOnline(): Boolean {
+    val cm = getSystemService(ConnectivityManager::class.java) ?: return false
+    val network = cm.activeNetwork ?: return false
+    val caps = cm.getNetworkCapabilities(network) ?: return false
+    val hasInternet = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+    val validated = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+    return hasInternet && validated
 }
 
 // ======== Activity ========
@@ -269,6 +295,23 @@ class PrescriptionsActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
+            val snackbarHostState = remember { SnackbarHostState() }
+            val scope = rememberCoroutineScope()
+
+            // Estado de conectividad observado en tiempo real
+            var isOnline by remember { mutableStateOf(this@PrescriptionsActivity.isOnline()) }
+
+            // Registrar callback del sistema
+            DisposableEffect(Unit) {
+                val cm = getSystemService(ConnectivityManager::class.java)
+                val callback = object : ConnectivityManager.NetworkCallback() {
+                    override fun onAvailable(network: Network) { isOnline = true }
+                    override fun onLost(network: Network) { isOnline = false }
+                }
+                cm.registerDefaultNetworkCallback(callback)
+                onDispose { cm.unregisterNetworkCallback(callback) }
+            }
+
             MaterialTheme(
                 colorScheme = lightColorScheme(
                     primary = Color(0xFF6B9BD8),
@@ -295,39 +338,71 @@ class PrescriptionsActivity : ComponentActivity() {
                                 containerColor = Color(0xFF6B9BD8)
                             )
                         )
-                    }
+                    },
+                    snackbarHost = { SnackbarHost(hostState = snackbarHostState) }
                 ) { pv ->
-                    Box(
+                    Column(
                         Modifier
                             .padding(pv)
                             .fillMaxSize()
                             .background(Color(0xFFF5F5F5))
                     ) {
-                        when (val state = vm.ui.value) {
-                            is PrescriptionsUiState.Loading -> {
-                                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                    CircularProgressIndicator()
+                        // Banner de conectividad
+                        if (!isOnline) {
+                            OfflineBanner()
+                        }
+
+                        Box(Modifier.weight(1f)) {
+                            when (val state = vm.ui.value) {
+                                is PrescriptionsUiState.Loading -> {
+                                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                        CircularProgressIndicator()
+                                    }
                                 }
-                            }
-                            is PrescriptionsUiState.Error -> {
-                                ErrorView(
-                                    message = state.message,
-                                    onRetry = { vm.refresh() }
-                                )
-                            }
-                            is PrescriptionsUiState.Success -> {
-                                if (state.items.isEmpty()) {
-                                    EmptyView()
-                                } else {
-                                    PrescriptionsList(
-                                        items = state.items,
-                                        expandedPrescription = vm.expandedPrescription.value,
-                                        prescriptionMedications = vm.prescriptionMedications.value,
-                                        loadingMedications = vm.loadingMedications.value,
-                                        onToggleExpansion = { vm.togglePrescriptionExpansion(it) },
-                                        onToggleActive = { id, status -> vm.togglePrescriptionActive(id, status) },
-                                        onOpen = { url -> openUrl(url) }
+                                is PrescriptionsUiState.Error -> {
+                                    ErrorView(
+                                        message = state.message,
+                                        onRetry = { vm.refresh() }
                                     )
+                                }
+                                is PrescriptionsUiState.Success -> {
+                                    if (state.items.isEmpty()) {
+                                        EmptyView()
+                                    } else {
+                                        PrescriptionsList(
+                                            items = state.items,
+                                            expandedPrescription = vm.expandedPrescription.value,
+                                            prescriptionMedications = vm.prescriptionMedications.value,
+                                            loadingMedications = vm.loadingMedications.value,
+                                            isOnline = isOnline,
+                                            onNotify = { msg ->
+                                                scope.launch {
+                                                    snackbarHostState.showSnackbar(msg)
+                                                }
+                                            },
+                                            onToggleExpansion = { vm.togglePrescriptionExpansion(it) },
+                                            onToggleActive = { id, status ->
+                                                if (!isOnline) {
+                                                    scope.launch {
+                                                        snackbarHostState.showSnackbar("Sin conexión: no puedes cambiar el estado.")
+                                                    }
+                                                    return@PrescriptionsList
+                                                }
+                                                vm.togglePrescriptionActive(id, status)
+                                            },
+                                            onDelete = { id, cb ->
+                                                if (!isOnline) {
+                                                    scope.launch {
+                                                        snackbarHostState.showSnackbar("Sin conexión: no puedes eliminar prescripciones.")
+                                                    }
+                                                    cb(false)
+                                                    return@PrescriptionsList
+                                                }
+                                                vm.deletePrescription(id, cb)
+                                            },
+                                            onOpen = { url -> openUrl(url) }
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -348,6 +423,29 @@ class PrescriptionsActivity : ComponentActivity() {
     }
 }
 
+@Composable
+private fun OfflineBanner() {
+    Surface(
+        color = Color(0xFFFFF3CD),
+        contentColor = Color(0xFF856404),
+        modifier = Modifier.fillMaxWidth(),
+        tonalElevation = 2.dp,
+        shadowElevation = 1.dp
+    ) {
+        Row(
+            Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(Icons.Filled.WifiOff, contentDescription = null)
+            Spacer(Modifier.width(8.dp))
+            Text(
+                "Sin conexión – modo lectura. No puedes eliminar ni cambiar estados.",
+                fontWeight = FontWeight.SemiBold
+            )
+        }
+    }
+}
+
 // ======== Composables ========
 
 @Composable
@@ -356,8 +454,11 @@ private fun PrescriptionsList(
     expandedPrescription: String?,
     prescriptionMedications: Map<String, List<PrescriptionMedication>>,
     loadingMedications: Set<String>,
+    isOnline: Boolean,
+    onNotify: (String) -> Unit,
     onToggleExpansion: (String) -> Unit,
     onToggleActive: (String, Boolean) -> Unit,
+    onDelete: (String, (Boolean) -> Unit) -> Unit,
     onOpen: (String) -> Unit
 ) {
     LazyColumn(
@@ -371,8 +472,11 @@ private fun PrescriptionsList(
                 isExpanded = expandedPrescription == p.id,
                 medications = prescriptionMedications[p.id] ?: emptyList(),
                 isLoadingMedications = loadingMedications.contains(p.id),
+                isOnline = isOnline,
+                onNotify = onNotify,
                 onToggleExpansion = { onToggleExpansion(p.id) },
                 onToggleActive = { onToggleActive(p.id, p.activa) },
+                onDelete = { cb -> onDelete(p.id, cb) },
                 onOpen = onOpen
             )
         }
@@ -385,10 +489,15 @@ private fun PrescriptionCard(
     isExpanded: Boolean,
     medications: List<PrescriptionMedication>,
     isLoadingMedications: Boolean,
+    isOnline: Boolean,
+    onNotify: (String) -> Unit,
     onToggleExpansion: () -> Unit,
     onToggleActive: () -> Unit,
+    onDelete: ((Boolean) -> Unit) -> Unit,
     onOpen: (String) -> Unit
 ) {
+    var showDeleteConfirm by remember { mutableStateOf(false) }
+
     Card(
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(
@@ -431,7 +540,25 @@ private fun PrescriptionCard(
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     StatusChip(prescription.status)
-                    Spacer(Modifier.width(8.dp))
+                    Spacer(Modifier.width(4.dp))
+                    IconButton(
+                        onClick = {
+                            if (!isOnline) {
+                                onNotify("Sin conexión: no puedes eliminar prescripciones.")
+                            } else {
+                                showDeleteConfirm = true
+                            }
+                        },
+                        modifier = Modifier.size(32.dp),
+                        enabled = isOnline
+                    ) {
+                        Icon(
+                            Icons.Filled.Delete,
+                            contentDescription = "Eliminar",
+                            tint = if (isOnline) Color(0xFFFF5252) else Color.Gray
+                        )
+                    }
+                    Spacer(Modifier.width(4.dp))
                     IconButton(
                         onClick = onToggleExpansion,
                         modifier = Modifier.size(32.dp)
@@ -501,14 +628,18 @@ private fun PrescriptionCard(
 
                 if (isLoadingMedications) {
                     Box(
-                        modifier = Modifier.fillMaxWidth().height(80.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(80.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         CircularProgressIndicator(modifier = Modifier.size(32.dp))
                     }
                 } else if (medications.isEmpty()) {
                     Box(
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 16.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
@@ -544,10 +675,18 @@ private fun PrescriptionCard(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Switch(
                         checked = prescription.activa,
-                        onCheckedChange = { onToggleActive() },
+                        onCheckedChange = {
+                            if (!isOnline) {
+                                onNotify("Sin conexión: no puedes cambiar el estado.")
+                            } else {
+                                onToggleActive()
+                            }
+                        },
+                        enabled = true, // switch visible, pero controlado arriba
                         colors = SwitchDefaults.colors(
                             checkedThumbColor = Color(0xFF4CAF50),
-                            checkedTrackColor = Color(0xFF4CAF50).copy(alpha = 0.5f)
+                            checkedTrackColor = Color(0xFF4CAF50).copy(alpha = 0.5f),
+                            uncheckedThumbColor = if (isOnline) Color.Gray else Color.LightGray
                         )
                     )
                     Spacer(Modifier.width(8.dp))
@@ -575,6 +714,36 @@ private fun PrescriptionCard(
                 )
             }
         }
+    }
+
+    // Confirmación de borrado
+    if (showDeleteConfirm) {
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirm = false },
+            title = { Text("Eliminar prescripción") },
+            text = { Text("Esta acción borrará la prescripción y sus medicamentos asociados. ¿Deseas continuar?") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        if (!isOnline) {
+                            onNotify("Sin conexión: no puedes eliminar prescripciones.")
+                            showDeleteConfirm = false
+                            return@TextButton
+                        }
+                        onDelete { _ ->
+                            showDeleteConfirm = false
+                        }
+                    }
+                ) {
+                    Text("Eliminar", color = Color(0xFFFF5252))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirm = false }) {
+                    Text("Cancelar")
+                }
+            }
+        )
     }
 }
 
@@ -624,32 +793,27 @@ private fun MedicationItemCard(medication: PrescriptionMedication) {
 
             Spacer(Modifier.height(8.dp))
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    if (medication.doseMg > 0) {
-                        Text(
-                            "💊 Dosis: ${medication.doseMg}mg",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color.Black
-                        )
-                    }
-                    if (medication.frequencyHours > 0) {
-                        Text(
-                            "⏰ Cada ${medication.frequencyHours} horas",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color.Black
-                        )
-                    }
-                    if (medication.sourceFile.isNotBlank()) {
-                        Text(
-                            "📄 Fuente: ${medication.sourceFile}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color.Gray
-                        )
-                    }
+            Column {
+                if (medication.doseMg > 0) {
+                    Text(
+                        "💊 Dosis: ${medication.doseMg}mg",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.Black
+                    )
+                }
+                if (medication.frequencyHours > 0) {
+                    Text(
+                        "⏰ Cada ${medication.frequencyHours} horas",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.Black
+                    )
+                }
+                if (medication.sourceFile.isNotBlank()) {
+                    Text(
+                        "📄 Fuente: ${medication.sourceFile}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.Gray
+                    )
                 }
             }
         }

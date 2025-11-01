@@ -1,4 +1,4 @@
-package com.example.mymeds.data
+package com.example.mymeds.repository
 
 import android.util.Log
 import com.example.mymeds.models.PhysicalPoint
@@ -20,6 +20,7 @@ class PhysicalPointsRepository {
 
             val pointsList = documents.documents.mapNotNull { doc ->
                 try {
+                    val id = doc.id // <- AGREGAR ESTA LÍNEA
                     val nombre = doc.getString("nombre") ?: ""
                     val direccion = doc.getString("direccion") ?: ""
                     val ubicacion = doc.getGeoPoint("ubicacion") ?: GeoPoint(0.0, 0.0)
@@ -27,9 +28,10 @@ class PhysicalPointsRepository {
                     val localidad = doc.getString("localidad") ?: ""
                     val telefono = doc.getString("telefono") ?: ""
 
-                    Log.d("Repository", "Processing: $nombre at (${ubicacion.latitude}, ${ubicacion.longitude})")
+                    Log.d("Repository", "Processing: ID=$id, $nombre at (${ubicacion.latitude}, ${ubicacion.longitude})")
 
                     PhysicalPoint(
+                        id = id, // <- AGREGAR ESTA LÍNEA
                         name = nombre,
                         address = direccion,
                         location = ubicacion,
@@ -45,7 +47,7 @@ class PhysicalPointsRepository {
 
             Log.d("Repository", "Successfully converted ${pointsList.size} points")
             pointsList.forEachIndexed { index, point ->
-                Log.d("Repository", "Point $index: ${point.name} at (${point.location.latitude}, ${point.location.longitude})")
+                Log.d("Repository", "Point $index: ID=${point.id}, ${point.name} at (${point.location.latitude}, ${point.location.longitude})")
             }
 
             Result.success(pointsList)

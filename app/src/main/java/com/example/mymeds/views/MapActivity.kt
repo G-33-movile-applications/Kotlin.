@@ -52,15 +52,18 @@ class MapActivity : ComponentActivity() {
                 MapScreen(
                     viewModel = mapViewModel,
                     onBackClick = { finish() },
-                    onViewInventory = { pharmacyName ->
+                    onViewInventory = { pharmacyName, pharmacyId ->
                         val intent = Intent(this, PharmacyInventoryActivity::class.java).apply {
                             putExtra("PHARMACY_NAME", pharmacyName)
+                            putExtra("PHARMACY_ID", pharmacyId)
                         }
                         startActivity(intent)
                     },
-                    onMakeOrder = { pharmacyName ->
-                        val intent = Intent(this, DeliveryActivity::class.java).apply {
+                    onMakeOrder = { pharmacyName, pharmacyId ->
+                        val intent = Intent(this, OrdersManagementActivity::class.java).apply {
                             putExtra("PHARMACY_NAME", pharmacyName)
+                            putExtra("PHARMACY_ID", pharmacyId)
+                            putExtra("FROM_MAP", true)
                         }
                         startActivity(intent)
                     }
@@ -75,8 +78,8 @@ class MapActivity : ComponentActivity() {
 fun MapScreen(
     viewModel: MapViewModel,
     onBackClick: () -> Unit,
-    onViewInventory: (String) -> Unit,
-    onMakeOrder: (String) -> Unit
+    onViewInventory: (String, String) -> Unit,
+    onMakeOrder: (String, String) -> Unit
 ) {
     val context = LocalContext.current
     val visiblePharmacies by viewModel.visiblePharmacies.observeAsState(initial = emptyList())
@@ -298,13 +301,13 @@ fun MapScreen(
                                     horizontalArrangement = Arrangement.SpaceEvenly
                                 ) {
                                     Button(
-                                        onClick = { onMakeOrder(point.name) },
+                                        onClick = { onMakeOrder(point.name, point.id) },
                                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6B9BD8))
                                     ) {
                                         Text("Hacer Pedido", color = Color.White)
                                     }
                                     Button(
-                                        onClick = { onViewInventory(point.name) },
+                                        onClick = { onViewInventory(point.name, point.id) },
                                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF6B9BD8))
                                     ) {
                                         Text("Ver inventario", color = Color.White)
@@ -320,7 +323,7 @@ fun MapScreen(
 }
 
 /**
- * Calcula los límites que incluyen la ubicación del usuario y las 3 farmacias más cercanas
+ * Calcula los límites que incluyen la ubicación del usuario y las 5 farmacias más cercanas
  */
 private fun calculateBounds(
     userLocation: LatLng,
@@ -331,7 +334,7 @@ private fun calculateBounds(
     // Agregar ubicación del usuario
     builder.include(userLocation)
 
-    // Agregar las 3 farmacias más cercanas
+    // Agregar las 5 farmacias más cercanas
     nearestPharmacies.forEach { (pharmacy, _) ->
         builder.include(LatLng(pharmacy.location.latitude, pharmacy.location.longitude))
     }

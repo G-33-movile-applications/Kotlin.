@@ -468,81 +468,100 @@ class PhotoOcrUploadViewModel : ViewModel() {
 
     /**
      * ═══════════════════════════════════════════════════════════════════════
-     * FUNCIÓN: saveAllMedications
+     * FUNCIÓN: saveAllMedications (AGLUTINADA POR PRESCRIPCIÓN)
      * ═══════════════════════════════════════════════════════════════════════
      *
      * IMPLEMENTACIÓN: I/O + Main (10 PUNTOS)
      */
-    fun saveAllMedications(userId: String, onDone: (Boolean, String) -> Unit) {
+    fun saveAllMedicationsGroupedAsPrescription(
+        userId: String,
+        onDone: (Boolean, String) -> Unit
+    ) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 Log.d(TAG, "╔═══════════════════════════════════════════════════════╗")
-                Log.d(TAG, "║  GUARDANDO ${parsedMedications.size} MEDICAMENTOS     ║")
+                Log.d(TAG, "║  GUARDANDO AGRUPADO ${parsedMedications.size} MEDS    ║")
                 Log.d(TAG, "╚═══════════════════════════════════════════════════════╝")
 
-                if (userId.isBlank()) {
-                    throw IllegalStateException("Usuario no autenticado.")
-                }
-
-                if (parsedMedications.isEmpty()) {
-                    throw IllegalStateException("No hay medicamentos para guardar.")
-                }
+                if (userId.isBlank()) throw IllegalStateException("Usuario no autenticado.")
+                if (parsedMedications.isEmpty()) throw IllegalStateException("No hay medicamentos para guardar.")
 
                 // Actualiza UI en Main
                 withContext(Dispatchers.Main) {
                     uploading = true
-                    progressMessage = "Guardando medicamentos..."
+                    progressMessage = "Creando prescripciones..."
                 }
 
-                val userMedsCollection = firestore
-                    .collection("usuarios").document(userId)
-                    .collection("medicamentosUsuario")
+                // Agrupar por archivo fuente (cada archivo = 1 prescripción)
+                val groups: Map<String, List<MedicationInfo>> =
+                    parsedMedications.groupBy { it.sourceFile.ifBlank { "Desconocido" } }
 
-                // GUARDADO PARALELO CON MÚLTIPLES CORRUTINAS ASYNC
-                val saveJobs = parsedMedications.mapIndexed { index, med ->
-                    async(Dispatchers.IO) {
-                        Log.d(TAG, "💾 [Async-IO] Guardando: ${med.name} en thread: ${Thread.currentThread().name}")
+                val userDoc = firestore.collection("usuarios").document(userId)
+                val prescRoot = userDoc.collection("prescripcionesUsuario")
 
-                        withContext(Dispatchers.Main) {
-                            progressMessage = "Guardando ${index + 1}/${parsedMedications.size}..."
-                        }
+                var totalMeds = 0
+                var createdPrescriptions = 0
 
-                        val doc = hashMapOf(
-                            "medicationId" to med.medicationId,
-                            "name" to med.name,
-                            "medicationRef" to med.medicationRef,
-                            "doseMg" to med.doseMg,
-                            "frequencyHours" to med.frequencyHours,
-                            "startDate" to med.startDate,
-                            "endDate" to med.endDate,
-                            "active" to med.active,
-                            "prescriptionId" to med.prescriptionId,
-                            "sourceFile" to med.sourceFile,
-                            "createdAt" to Date()
-                        )
-
-                        val docRef = userMedsCollection.add(doc).await()
-                        Log.d(TAG, "✅ Guardado con ID: ${docRef.id}")
-
-                        med.name
+                for ((sourceFile, meds) in groups) {
+                    withContext(Dispatchers.Main) {
+                        progressMessage = "Creando prescripción de $sourceFile..."
                     }
-                }
 
-                val savedNames = saveJobs.awaitAll()
+                    // Documento de prescripción
+                    val prescData = hashMapOf(
+                        "fileName" to sourceFile,
+                        "uploadedAt" to Date(),
+                        "status" to "pendiente",
+                        "totalItems" to meds.size,
+                        "fromOCR" to true,
+                        "notes" to ""
+                    )
+
+                    val prescRef = prescRoot.add(prescData).await()
+                    createdPrescriptions++
+
+                    val medsCol = prescRef.collection("medicamentosPrescripcion")
+
+                    // Guardado paralelo de medicamentos del grupo
+                    val jobs = meds.mapIndexed { idx, med ->
+                        async(Dispatchers.IO) {
+                            withContext(Dispatchers.Main) {
+                                progressMessage = "Guardando ${idx + 1}/${meds.size} en $sourceFile..."
+                            }
+
+                            val doc = hashMapOf(
+                                "medicationId" to med.medicationId,
+                                "name" to med.name,
+                                "medicationRef" to med.medicationRef,
+                                "doseMg" to med.doseMg,
+                                "frequencyHours" to med.frequencyHours,
+                                "startDate" to med.startDate,
+                                "endDate" to med.endDate,
+                                "active" to med.active,
+                                "prescriptionId" to (med.prescriptionId.ifBlank { prescRef.id }),
+                                "sourceFile" to med.sourceFile,
+                                "createdAt" to Date()
+                            )
+                            medsCol.add(doc).await()
+                        }
+                    }
+                    jobs.awaitAll()
+                    totalMeds += meds.size
+                }
 
                 withContext(Dispatchers.Main) {
                     uploading = false
                     progressMessage = "Guardado completo"
                 }
 
-                onDone(true, "✅ ${savedNames.size} medicamento(s) guardado(s)")
+                onDone(true, "✅ $createdPrescriptions prescripción(es), $totalMeds medicamento(s) guardado(s)")
 
                 Log.d(TAG, "╔═══════════════════════════════════════════════════════╗")
-                Log.d(TAG, "║  GUARDADO COMPLETADO                                  ║")
+                Log.d(TAG, "║  GUARDADO POR PRESCRIPCIÓN COMPLETADO                 ║")
                 Log.d(TAG, "╚═══════════════════════════════════════════════════════╝")
 
             } catch (e: Exception) {
-                Log.e(TAG, "❌ Error al guardar", e)
+                Log.e(TAG, "❌ Error al guardar agrupado", e)
 
                 withContext(Dispatchers.Main) {
                     uploading = false
@@ -868,7 +887,8 @@ private fun UploadPrescriptionPhotoScreen(vm: PhotoOcrUploadViewModel, finish: (
                         }
 
                         if (activity != null) {
-                            vm.saveAllMedications(userId) { ok, msg ->
+                            // ⬇️⬇️⬇️  GUARDADO AGRUPADO POR PRESCRIPCIÓN  ⬇️⬇️⬇️
+                            vm.saveAllMedicationsGroupedAsPrescription(userId) { ok, msg ->
                                 activity.runOnUiThread {
                                     Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show()
                                     if (ok) finish()

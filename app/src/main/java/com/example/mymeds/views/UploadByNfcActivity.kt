@@ -1,8 +1,13 @@
 package com.example.mymeds.views
 
+import android.app.PendingIntent
+import android.content.Intent
+import android.content.IntentFilter
 import android.nfc.NfcAdapter
 import android.nfc.Tag
+import android.nfc.tech.Ndef
 import android.os.Bundle
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -10,28 +15,27 @@ import androidx.activity.viewModels
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
 import com.example.mymeds.viewModels.NfcViewModel
 import com.example.mymeds.views.components.PrescriptionComponents.HeaderStatusCard
 import com.example.mymeds.views.components.PrescriptionComponents.LargeActionCard
 import com.example.mymeds.views.components.PrescriptionComponents.HelpBox
-import java.util.concurrent.atomic.AtomicReference
+import com.google.firebase.auth.FirebaseAuth
 
 class UploadByNfcActivity : ComponentActivity() {
 
     private val vm: NfcViewModel by viewModels()
     private var nfcAdapter: NfcAdapter? = null
-    private val pendingTag = AtomicReference<Tag?>(null)
-
-    private val readerCallback = NfcAdapter.ReaderCallback { tag ->
-        vm.onTagDiscovered(tag)
-        pendingTag.set(tag) // Guarda el tag para operaciones posteriores
-    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -39,51 +43,103 @@ class UploadByNfcActivity : ComponentActivity() {
         vm.init(nfcAdapter)
 
         setContent {
-            UploadByNfcScreen(
-                vm = vm,
-                onRead = { enableReading(true) },
-                onStopRead = { enableReading(false) },
-                onWrite = { json: String ->
-                    val tag = pendingTag.get()
-                    if (tag == null) {
-                        Toast.makeText(this, "Acerque un tag para escribir", Toast.LENGTH_SHORT).show()
-                    } else {
-                        vm.writeToTag(tag, json) { _, msg ->
-                            runOnUiThread { Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() }
+            val navController = rememberNavController()
+            NavHost(navController = navController, startDestination = "main_nfc_screen") {
+
+                composable("main_nfc_screen") {
+                    UploadByNfcScreen(
+                        vm = vm,
+                        onRead = { vm.startReading() },
+                        onStopRead = { vm.stopReading() },
+                        onWipe = { vm.prepareToWipe() },
+                        onWrite = {
+                            navController.navigate("nfc_builder_screen")
+                        },
+                        onSave = {
+                            val userId = FirebaseAuth.getInstance().currentUser?.uid
+                            if (userId.isNullOrBlank()) {
+                                Toast.makeText(this@UploadByNfcActivity, "Error: Usuario no autenticado.", Toast.LENGTH_LONG).show()
+                            } else {
+                                vm.saveLastReadDataToFirebase(userId) { success, message ->
+                                    Toast.makeText(this@UploadByNfcActivity, message, Toast.LENGTH_LONG).show()
+                                    if (success) {
+                                        finish()
+                                    }
+                                }
+                            }
+                        },
+                        onBack = { finish() }
+                    )
+                }
+
+                composable("nfc_builder_screen") {
+                    NfcBuilderActivity(
+                        onBuildPrescription = { medJsonStrings ->
+                            val finalJson = buildPrescriptionJson(medJsonStrings)
+                            vm.prepareToWrite(finalJson)
+                            navController.popBackStack()
+                            Toast.makeText(this@UploadByNfcActivity, "Listo para escribir. Acerque el tag NFC.", Toast.LENGTH_LONG).show()
+                        },
+                        onBack = {
+                            navController.popBackStack()
                         }
-                    }
-                },
-                onWipe = {
-                    val tag = pendingTag.get()
-                    if (tag == null) {
-                        Toast.makeText(this, "Acerque un tag para limpiar", Toast.LENGTH_SHORT).show()
-                    } else {
-                        vm.wipeTag(tag) { _, msg ->
-                            runOnUiThread { Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() }
-                        }
-                    }
-                },
-                onBack = { finish() }
-            )
+                    )
+                }
+            }
         }
     }
 
-    private fun enableReading(enable: Boolean) {
-        if (enable) {
-            nfcAdapter?.enableReaderMode(
-                this,
-                readerCallback,
-                NfcAdapter.FLAG_READER_NFC_A or
-                        NfcAdapter.FLAG_READER_NFC_B or
-                        NfcAdapter.FLAG_READER_NFC_F or
-                        NfcAdapter.FLAG_READER_NFC_V or
-                        NfcAdapter.FLAG_READER_NFC_BARCODE,
-                Bundle().apply { putInt(NfcAdapter.EXTRA_READER_PRESENCE_CHECK_DELAY, 50) }
-            )
-            vm.startReading()
-        } else {
-            nfcAdapter?.disableReaderMode(this)
-            vm.stopReading()
+   override fun onResume() {
+        super.onResume()
+        enableForegroundDispatch()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        disableForegroundDispatch()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        if (NfcAdapter.ACTION_NDEF_DISCOVERED == intent.action ||
+            NfcAdapter.ACTION_TECH_DISCOVERED == intent.action ||
+            NfcAdapter.ACTION_TAG_DISCOVERED == intent.action) {
+            Log.d("UploadByNfcActivity", "Foreground Dispatch discovered a tag.")
+            val tag = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                intent.getParcelableExtra(NfcAdapter.EXTRA_TAG, Tag::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                intent.getParcelableExtra(NfcAdapter.EXTRA_TAG)
+            }
+            tag?.let {
+                vm.onTagDiscovered(it)
+            }
+        }
+    }
+
+    private fun enableForegroundDispatch() {
+        if (nfcAdapter == null) {
+            Log.e("UploadByNfcActivity", "NFC Adapter not available.")
+            return
+        }
+        try {
+            val intent = Intent(this, javaClass).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            val pendingIntent = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_MUTABLE) // Using MUTABLE as in your original file
+            val ndefFilter = arrayOf(IntentFilter(NfcAdapter.ACTION_NDEF_DISCOVERED).apply { addDataType("*/*") })
+            val techLists = arrayOf(arrayOf(Ndef::class.java.name))
+            nfcAdapter?.enableForegroundDispatch(this, pendingIntent, ndefFilter, techLists)
+            Log.d("UploadByNfcActivity", "Foreground Dispatch Enabled")
+        } catch (e: Exception) {
+            Log.e("UploadByNfcActivity", "Error enabling foreground dispatch", e)
+        }
+    }
+
+    private fun disableForegroundDispatch() {
+        try {
+            nfcAdapter?.disableForegroundDispatch(this)
+            Log.d("UploadByNfcActivity", "Foreground Dispatch Disabled")
+        } catch (e: Exception) {
+            Log.e("UploadByNfcActivity", "Error disabling foreground dispatch", e)
         }
     }
 }
@@ -94,8 +150,9 @@ fun UploadByNfcScreen(
     vm: NfcViewModel,
     onRead: () -> Unit,
     onStopRead: () -> Unit,
-    onWrite: (String) -> Unit,
+    onWrite: () -> Unit,
     onWipe: () -> Unit,
+    onSave: () -> Unit,
     onBack: () -> Unit
 ) {
     val ui by vm.ui.collectAsState()
@@ -115,7 +172,6 @@ fun UploadByNfcScreen(
             modifier = Modifier
                 .padding(pad)
                 .padding(16.dp)
-                .fillMaxSize()
                 .verticalScroll(scroll),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
@@ -124,8 +180,24 @@ fun UploadByNfcScreen(
                 enabled = ui.enabled,
                 reading = ui.reading,
                 status = ui.status,
-                lastPayload = ui.lastPayload
+                lastReadData = ui.parsedData
             )
+
+            if (ui.parsedData != null && !ui.isSaving) {
+                Spacer(Modifier.height(16.dp))
+                Button(onClick = onSave, modifier = Modifier.fillMaxWidth().height(56.dp)) {
+                    Icon(Icons.Filled.Save, contentDescription = "Guardar")
+                    Spacer(Modifier.width(8.dp))
+                    Text("Guardar prescripción")
+                }
+            }
+
+            if (ui.isSaving) {
+                Spacer(Modifier.height(16.dp))
+                CircularProgressIndicator()
+                Spacer(Modifier.height(8.dp))
+                Text(ui.status, style = MaterialTheme.typography.bodyMedium)
+            }
 
             Text("Acciones NFC", style = MaterialTheme.typography.titleMedium)
 
@@ -139,9 +211,9 @@ fun UploadByNfcScreen(
 
             LargeActionCard(
                 title = "Escribir Prescripción en NFC",
-                subtitle = "Guarda una prescripción en un tag NFC",
+                subtitle = "Selecciona medicamentos para guardar en un tag NFC",
                 enabled = ui.supported && ui.enabled,
-                onClick = { onWrite(buildPrescriptionJsonFromState()) },
+                onClick = onWrite,
                 leading = { Text("✍️", style = MaterialTheme.typography.titleLarge) }
             )
 
@@ -149,7 +221,7 @@ fun UploadByNfcScreen(
                 title = "Limpiar Tag NFC",
                 subtitle = "Borra todo el contenido de un tag NFC",
                 enabled = ui.supported && ui.enabled,
-                onClick = onWipe,
+                onClick = onWipe, // This works as before
                 leading = { Text("🧹", style = MaterialTheme.typography.titleLarge) }
             )
 
@@ -159,27 +231,31 @@ fun UploadByNfcScreen(
                 }
             }
 
+            Spacer(Modifier.weight(1f))
+
             HelpBox(
                 title = "Cómo usar NFC",
-                bullets = listOf(
-                    "Activa NFC en tu dispositivo",
-                    "Acerque el teléfono al tag NFC",
-                    "Espere la confirmación de lectura o escritura"
-                ),
+                bullets = listOf("Activa NFC en tu dispositivo", "Acerque el teléfono al tag NFC", "Espere la confirmación de lectura o escritura"),
                 footnote = null
             )
         }
     }
 }
 
-/* ==== Ejemplo de JSON de prescripción ==== */
-private fun buildPrescriptionJsonFromState(): String = """
-{
-  "rxId": "RX-${System.currentTimeMillis()}",
-  "patient": "P12345",
-  "meds": [{"drug":"Amoxicillin 500mg","dose":"1 cap","freq":"8h","days":7}],
-  "issuedAt": "${java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'").format(java.util.Date())}",
-  "signed": false
-}
-""".trimIndent()
+// Funcion para terminar de armar el String que será el JSON
+private fun buildPrescriptionJson(medJsonStrings: List<String>): String {
+    val currentUserId = FirebaseAuth.getInstance().currentUser?.uid ?: "default_user_id_error"
+    val sdf = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", java.util.Locale.US)
+    val currentTime = sdf.format(java.util.Date())
+    val medsArrayString = medJsonStrings.joinToString(separator = ",")
 
+    return """
+    {
+      "rxId": "RX-${System.currentTimeMillis()}",
+      "patient": "$currentUserId",
+      "meds": [$medsArrayString],
+      "issuedAt": "$currentTime",
+      "signed": true
+    }
+    """.trimIndent()
+}

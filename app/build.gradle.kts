@@ -7,6 +7,8 @@ plugins {
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.google.services)
     alias(libs.plugins.ksp)
+    
+
 }
 
 android {
@@ -66,6 +68,7 @@ configurations.configureEach {
     exclude(group = "com.intellij", module = "annotations")
 }
 
+
 dependencies {
     // ✅ Fuerza 1 sola lib de anotaciones (JetBrains)
     implementation("org.jetbrains:annotations:24.1.0")
@@ -120,6 +123,9 @@ dependencies {
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
     ksp(libs.androidx.room.compiler)
+
+    // --- WorkManager for background jobs ---
+    implementation("androidx.work:work-runtime-ktx:2.9.0")
 
     // --- DataStore (KV) ---
     implementation("androidx.datastore:datastore-preferences:1.1.1")

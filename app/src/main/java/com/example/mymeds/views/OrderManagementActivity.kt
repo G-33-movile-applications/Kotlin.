@@ -6,8 +6,6 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.location.Geocoder
 import android.location.Location
-import android.net.ConnectivityManager
-import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
@@ -63,34 +61,7 @@ import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.sqrt
 
-// ⬇️ NUEVO: imports para persistencia local y WorkManager
-import java.io.File
-import java.io.FileInputStream
-import java.io.FileOutputStream
-import org.json.JSONArray
-import org.json.JSONObject
-import androidx.work.BackoffPolicy
-import androidx.work.Constraints
-import androidx.work.CoroutineWorker
-import androidx.work.Data
-import androidx.work.ExistingWorkPolicy
-import androidx.work.NetworkType
-import androidx.work.OneTimeWorkRequestBuilder
-import androidx.work.WorkManager
-import androidx.work.WorkerParameters
-import java.util.concurrent.TimeUnit
-
 private const val TAG = "OrdersManagementActivity"
-
-// ⬇️ NUEVO: helper de conectividad (sin permisos adicionales)
-private fun isOnline(ctx: Context): Boolean {
-    val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-    val network = cm.activeNetwork ?: return false
-    val caps = cm.getNetworkCapabilities(network) ?: return false
-    return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ||
-            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
-}
 
 /**
  * ╔══════════════════════════════════════════════════════════════════════════╗
@@ -171,151 +142,6 @@ class OrdersManagementActivity : ComponentActivity() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// ⬇️ NUEVO: Administrador de borradores offline (JSON en filesDir/draft_orders)
-// ═══════════════════════════════════════════════════════════════════════════
-
-private class DraftOrderStore(private val context: Context) {
-    private val dir = File(context.filesDir, "draft_orders").apply { if (!exists()) mkdirs() }
-
-    fun saveDraft(payload: JSONObject): String {
-        val id = "draft_${System.currentTimeMillis()}.json"
-        val file = File(dir, id)
-        FileOutputStream(file).use { it.write(payload.toString().toByteArray()) }
-        Log.d(TAG, "📄 [Draft] Guardado: ${file.absolutePath}")
-        return file.absolutePath
-    }
-
-    fun listDraftFiles(): List<File> = dir.listFiles()?.toList() ?: emptyList()
-
-    fun readDraft(path: String): JSONObject? = try {
-        FileInputStream(File(path)).use { fis ->
-            val text = fis.readBytes().toString(Charsets.UTF_8)
-            JSONObject(text)
-        }
-    } catch (e: Exception) {
-        Log.e(TAG, "❌ [Draft] Error leyendo $path", e)
-        null
-    }
-
-    fun deleteDraft(path: String) {
-        try { File(path).delete() } catch (_: Exception) {}
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// ⬇️ NUEVO: Worker para sincronizar pedidos guardados offline
-// ═══════════════════════════════════════════════════════════════════════════
-
-class DraftOrderSyncWorker(
-    appContext: Context,
-    params: WorkerParameters
-) : CoroutineWorker(appContext, params) {
-
-    private val repo = OrdersRepository()
-    private val store = DraftOrderStore(appContext)
-
-    override suspend fun doWork(): Result {
-        // Solo intenta si hay red
-        if (!isOnline(applicationContext)) return Result.retry()
-        return try {
-            // Procesa todos los borradores pendientes
-            val drafts = store.listDraftFiles()
-            for (f in drafts) {
-                val json = store.readDraft(f.absolutePath) ?: continue
-
-                // Reconstruir objetos mínimos para OrdersRepository.createOrder(...)
-                val pharmacyJson = json.getJSONObject("pharmacy")
-                val pharmacy = PhysicalPoint(
-                    id = pharmacyJson.getString("id"),
-                    name = pharmacyJson.getString("name"),
-                    address = pharmacyJson.optString("address"),
-                    phone = pharmacyJson.optString("phone"),
-                    openingHours = pharmacyJson.optString("openingHours"),
-                    location = pharmacyJson.getJSONObject("location").let { loc ->
-                        GeoPoint(
-                            latitude = loc.getDouble("lat"),
-                            longitude = loc.getDouble("lng")
-                        )
-                    }
-                )
-
-                val cartJson = json.getJSONObject("cart")
-                val itemsArray = cartJson.getJSONArray("items")
-                val items = mutableListOf<CartItem>()
-                for (i in 0 until itemsArray.length()) {
-                    val it = itemsArray.getJSONObject(i)
-                    items.add(
-                        CartItem(
-                            medicationId    = it.getString("medicationId"),
-                            medicationRef   = it.optString("medicationRef"),
-                            medicationName  = it.getString("medicationName"),
-                            quantity        = it.getInt("quantity"),
-                            pricePerUnit    = it.getInt("pricePerUnit"),
-                            stock           = it.getInt("stock"),
-                            batch           = it.optString("batch"),
-                            principioActivo = it.optString("principioActivo"),
-                            presentacion    = it.optString("presentacion"),
-                            laboratorio     = it.optString("laboratorio")
-                        )
-                    )
-                }
-                val cart = ShoppingCart(
-                    pharmacyId = cartJson.getString("pharmacyId"),
-                    pharmacyName = cartJson.getString("pharmacyName"),
-                    items = items.toMutableList()
-                )
-
-                val deliveryType = DeliveryType.valueOf(json.getString("deliveryType"))
-                val userId = json.getString("userId")
-                val address = json.getString("deliveryAddress")
-                val phone = json.getString("phoneNumber")
-                val notes = json.optString("notes", "")
-
-                val result = repo.createOrder(
-                    cart = cart,
-                    userId = userId,
-                    pharmacy = pharmacy,
-                    deliveryType = deliveryType,
-                    deliveryAddress = address,
-                    phoneNumber = phone,
-                    notes = notes
-                )
-
-                if (result.isSuccess) {
-                    Log.d(TAG, "☁️ [Worker] Enviado draft OK → ${result.getOrNull()}")
-                    store.deleteDraft(f.absolutePath)
-                } else {
-                    Log.e(TAG, "❌ [Worker] Falla enviando draft ${f.name}: ${result.exceptionOrNull()?.message}")
-                    // si uno falla, reintentar luego
-                    return Result.retry()
-                }
-            }
-            Result.success()
-        } catch (e: Exception) {
-            Log.e(TAG, "❌ [Worker] Error general", e)
-            Result.retry()
-        }
-    }
-
-    companion object {
-        private const val UNIQUE_NAME = "DraftOrderSync"
-        fun enqueue(context: Context) {
-            val constraints = Constraints.Builder()
-                .setRequiredNetworkType(NetworkType.CONNECTED)
-                .build()
-
-            val req = OneTimeWorkRequestBuilder<DraftOrderSyncWorker>()
-                .setConstraints(constraints)
-                .setBackoffCriteria(BackoffPolicy.EXponential, 30, TimeUnit.SECONDS)
-                .build()
-
-            WorkManager.getInstance(context)
-                .enqueueUniqueWork(UNIQUE_NAME, ExistingWorkPolicy.KEEP, req)
-        }
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
 // VIEWMODEL
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -343,7 +169,6 @@ class EnhancedOrdersViewModel(
     private val pharmacyRepository = PharmacyInventoryRepository()
     private val firestore = FirebaseFirestore.getInstance()
     private val auth = FirebaseAuth.getInstance()
-    private val draftsStore = DraftOrderStore(context) // ⬅️ NUEVO
 
     private val _uiState = MutableStateFlow<OrderUiState>(OrderUiState.Loading)
     val uiState: StateFlow<OrderUiState> = _uiState.asStateFlow()
@@ -412,6 +237,9 @@ class EnhancedOrdersViewModel(
                 _uiState.value = OrderUiState.Error(e.message ?: "Error desconocido")
             }
         }
+    } catch (e: Exception) {
+        Log.e(TAG, "❌ [Draft] Error leyendo $path", e)
+        null
     }
 
     @RequiresApi(Build.VERSION_CODES.O)
@@ -684,61 +512,6 @@ class EnhancedOrdersViewModel(
         )
     }
 
-    // ⬇️ NUEVO: serializar orden a JSON para borrador offline
-    private fun buildDraftJson(
-        cart: ShoppingCart,
-        userId: String,
-        pharmacy: PhysicalPoint,
-        deliveryType: DeliveryType,
-        deliveryAddress: String,
-        phoneNumber: String,
-        notes: String
-    ): JSONObject {
-        val items = JSONArray().apply {
-            cart.items.forEach { it ->
-                put(
-                    JSONObject().apply {
-                        put("medicationId", it.medicationId)
-                        put("medicationRef", it.medicationRef)
-                        put("medicationName", it.medicationName)
-                        put("quantity", it.quantity)
-                        put("pricePerUnit", it.pricePerUnit)
-                        put("stock", it.stock)
-                        put("batch", it.batch)
-                        put("principioActivo", it.principioActivo)
-                        put("presentacion", it.presentacion)
-                        put("laboratorio", it.laboratorio)
-                    }
-                )
-            }
-        }
-        val cartJson = JSONObject().apply {
-            put("pharmacyId", cart.pharmacyId)
-            put("pharmacyName", cart.pharmacyName)
-            put("items", items)
-        }
-        val pharmacyJson = JSONObject().apply {
-            put("id", pharmacy.id)
-            put("name", pharmacy.name)
-            put("address", pharmacy.address)
-            put("phone", pharmacy.phone)
-            put("openingHours", pharmacy.openingHours)
-            put("location", JSONObject().apply {
-                put("lat", pharmacy.location.latitude)
-                put("lng", pharmacy.location.longitude)
-            })
-        }
-        return JSONObject().apply {
-            put("userId", userId)
-            put("cart", cartJson)
-            put("pharmacy", pharmacyJson)
-            put("deliveryType", deliveryType.name)
-            put("deliveryAddress", deliveryAddress)
-            put("phoneNumber", phoneNumber)
-            put("notes", notes)
-        }
-    }
-
     fun createOrder(
         deliveryType: DeliveryType,
         deliveryAddress: String,
@@ -759,48 +532,30 @@ class EnhancedOrdersViewModel(
         if (currentCart.isEmpty()) {
             onError("El carrito está vacío"); return
         }
+    }
 
         viewModelScope.launch {
             try {
                 isLoading = true
-                if (isOnline(context)) {
-                    // Intento directo online
-                    val result = ordersRepository.createOrder(
-                        cart = currentCart,
-                        userId = userId,
-                        pharmacy = pharmacy,
-                        deliveryType = deliveryType,
-                        deliveryAddress = deliveryAddress,
-                        phoneNumber = phoneNumber,
-                        notes = notes
-                    )
-                    if (result.isSuccess) {
-                        val orderId = result.getOrNull()!!
-                        clearCart()
-                        loadUserOrders()
-                        isLoading = false
-                        onSuccess(orderId)
-                    } else {
-                        // Falla online: guardar borrador y encolar
-                        val path = draftsStore.saveDraft(
-                            buildDraftJson(currentCart, userId, pharmacy, deliveryType, deliveryAddress, phoneNumber, notes)
-                        )
-                        DraftOrderSyncWorker.enqueue(context)
-                        clearCart()
-                        isLoading = false
-                        onSuccess("OFFLINE_DRAFT") // ID simbólico
-                        Toast.makeText(context, "Pedido guardado offline (reintento automático)", Toast.LENGTH_LONG).show()
-                    }
-                } else {
-                    // Sin red: guardar borrador y encolar
-                    val path = draftsStore.saveDraft(
-                        buildDraftJson(currentCart, userId, pharmacy, deliveryType, deliveryAddress, phoneNumber, notes)
-                    )
-                    DraftOrderSyncWorker.enqueue(context)
+                val result = ordersRepository.createOrder(
+                    cart = currentCart,
+                    userId = userId,
+                    pharmacy = pharmacy,
+                    deliveryType = deliveryType,
+                    deliveryAddress = deliveryAddress,
+                    phoneNumber = phoneNumber,
+                    notes = notes
+                )
+                if (result.isSuccess) {
+                    val orderId = result.getOrNull()!!
                     clearCart()
+                    loadUserOrders()
                     isLoading = false
-                    onSuccess("OFFLINE_DRAFT")
-                    Toast.makeText(context, "Sin conexión. Pedido guardado en el dispositivo.", Toast.LENGTH_LONG).show()
+                    onSuccess(orderId)
+                } else {
+                    val e = result.exceptionOrNull()
+                    isLoading = false
+                    onError(e?.message ?: "Error creando pedido")
                 }
             } catch (e: Exception) {
                 isLoading = false
@@ -1094,12 +849,7 @@ fun EnhancedOrdersManagementScreen(
                     notes = notes,
                     onSuccess = {
                         showCheckoutDialog = false
-                        Toast.makeText(
-                            context,
-                            if (it == "OFFLINE_DRAFT") "📥 Pedido guardado offline. Se enviará automáticamente."
-                            else "✅ Pedido creado",
-                            Toast.LENGTH_LONG
-                        ).show()
+                        Toast.makeText(context, "✅ Pedido creado", Toast.LENGTH_SHORT).show()
                         vm.deselectPrescription()
                     },
                     onError = { error ->
@@ -2047,3 +1797,4 @@ fun OrderStatusBadge(status: OrderStatus) {
         Text(text, modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp), style = MaterialTheme.typography.labelSmall, color = color, fontWeight = FontWeight.SemiBold)
     }
 }
+

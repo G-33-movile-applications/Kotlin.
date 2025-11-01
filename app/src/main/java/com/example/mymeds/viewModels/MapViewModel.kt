@@ -5,7 +5,7 @@ import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.mymeds.data.PhysicalPointsRepository
+import com.example.mymeds.repository.PhysicalPointsRepository
 import com.example.mymeds.models.PhysicalPoint
 import com.example.mymeds.utils.LocationUtils
 import com.google.android.gms.maps.model.LatLng
@@ -79,10 +79,10 @@ class MapViewModel : ViewModel() {
     private fun updateRelevantPharmacies(userLocation: LatLng) {
         val relevant = LocationUtils.getRelevantPharmacies(userLocation, allPharmacies, 6000.0)
 
-        // Actualizar las 3 más cercanas
+        // Actualizar las 5 más cercanas
         _nearestPharmacies.value = relevant.nearestThree
 
-        // Combinar las 3 más cercanas con las del radio (sin duplicados)
+        // Combinar las 5 más cercanas con las del radio (sin duplicados)
         val nearestPharmaciesSet = relevant.nearestThree.map { it.first }.toSet()
         val allRelevant = (nearestPharmaciesSet + relevant.withinRadius).toList()
 

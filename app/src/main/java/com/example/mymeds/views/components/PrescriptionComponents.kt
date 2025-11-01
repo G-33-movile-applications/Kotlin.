@@ -2,90 +2,165 @@ package com.example.mymeds.views.components
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Divider
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.example.mymeds.viewModels.NfcViewModel
+import java.text.SimpleDateFormat
+import java.util.Locale
 
 object PrescriptionComponents {
-
-    /**
-     * Tarjeta de estado NFC (disponible, activado, leyendo) y último payload leído.
-     */
+    
     @Composable
     fun HeaderStatusCard(
         supported: Boolean,
         enabled: Boolean,
         reading: Boolean,
         status: String,
-        lastPayload: String?
+        lastReadData: NfcViewModel.NfcData?
     ) {
-        val bg = Color(0xFFB8C7EE)
-        val muted = Color(0xFF6B7280)
+        // Se cambia el fondo si se lee exitosamente
+        val bgColor = if (lastReadData != null) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFB8C7EE)
 
         Surface(
-            color = bg,
+            color = bgColor,
             shape = RoundedCornerShape(16.dp),
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth(),
+            tonalElevation = 1.dp,
+            shadowElevation = 1.dp
         ) {
             Column(
-                Modifier
-                    .padding(16.dp)
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
+                // NFC Status Text
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("📶", style = MaterialTheme.typography.titleLarge)
-                    Spacer(Modifier.width(8.dp))
-                    val title = when {
-                        !supported -> "NFC No Disponible"
-                        !enabled   -> "NFC Desactivado"
-                        reading    -> "Leyendo NFC…"
-                        else       -> "NFC Listo"
+                    val nfcIcon = when {
+                        !supported -> "❌"
+                        !enabled -> "⚠️"
+                        reading -> "📡"
+                        else -> "✅"
                     }
+                    Text(nfcIcon, style = MaterialTheme.typography.titleLarge)
+                    Spacer(Modifier.width(8.dp))
                     Text(
-                        title,
+                        text = when {
+                            !supported -> "NFC No Soportado"
+                            !enabled -> "NFC Desactivado"
+                            reading -> "Escaneando..."
+                            else -> "NFC Listo"
+                        },
                         style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold
+                        fontWeight = FontWeight.Bold
                     )
                 }
                 Text(
-                    text = when {
-                        !supported -> "Este dispositivo no soporta NFC"
-                        !enabled   -> "Activa NFC en Ajustes para continuar"
-                        status.isNotBlank() -> status
-                        else -> "Acerque el tag para leer o elija una acción"
-                    },
+                    text = status,
                     style = MaterialTheme.typography.bodyMedium,
-                    color = muted
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
                 )
-
-                if (!lastPayload.isNullOrBlank()) {
-                    Divider(color = Color.White.copy(alpha = 0.6f))
-                    Text("Última prescripción leída:", style = MaterialTheme.typography.labelLarge)
-                    Text(
-                        lastPayload,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFF1A2247)
-                    )
+                if (lastReadData != null) {
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                    PrescriptionInfoCard(prescription = lastReadData)
                 }
             }
         }
     }
 
     /**
-     * Tarjeta de acción grande (NFC/Imagen/PDF).
-     * Usa un slot [leading] para icono/emoji.
+     * Composable con detalle de la prescripción
      */
+    @Composable
+    private fun PrescriptionInfoCard(prescription: NfcViewModel.NfcData) {
+        val issuedDate = remember(prescription.issuedTimestamp) {
+            try {
+                val parser = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US)
+                val formatter = SimpleDateFormat("dd MMM yyyy, HH:mm", Locale.getDefault())
+                parser.parse(prescription.issuedTimestamp)?.let { formatter.format(it) } ?: "Fecha inválida"
+            } catch (e: Exception) {
+                "Fecha inválida"
+            }
+        }
+
+        Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            // Info de la prescripción conteniendo los meds
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                InfoRow(icon = Icons.Default.Description, text = prescription.id)
+                Text(
+                    text = issuedDate,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                )
+            }
+
+            // Lista de meds
+            prescription.medications.forEach { med ->
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        InfoRow(icon = Icons.Default.MedicalServices, text = med.drugName, isTitle = true)
+                        Divider()
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(16.dp)
+                        ) {
+                            Box(modifier = Modifier.weight(1f)) {
+                                InfoRow(icon = Icons.Default.Vaccines, text = "Dosis ${med.dose}mg")
+                            }
+                            Box(modifier = Modifier.weight(1f)) {
+                                InfoRow(icon = Icons.Default.Schedule, text = "Cada ${med.frequency}")
+                            }
+                        }
+                        InfoRow(icon = Icons.Default.CalendarToday, text = "${med.durationInDays} días de tratamiento")
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Para crear las filas de icono y texto
+     */
+    @Composable
+    private fun InfoRow(icon: ImageVector, text: String, isTitle: Boolean = false) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = text,
+                modifier = Modifier.size(if (isTitle) 20.dp else 18.dp),
+                tint = MaterialTheme.colorScheme.primary
+            )
+            Text(
+                text = text,
+                style = if (isTitle) MaterialTheme.typography.titleMedium else MaterialTheme.typography.bodyMedium,
+                fontWeight = if (isTitle) FontWeight.Bold else FontWeight.Normal,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+
     @Composable
     fun LargeActionCard(
         title: String,
@@ -128,9 +203,6 @@ object PrescriptionComponents {
         }
     }
 
-    /**
-     * Caja de ayuda con bullets y nota al pie.
-     */
     @Composable
     fun HelpBox(title: String, bullets: List<String>, footnote: String?) {
         Surface(

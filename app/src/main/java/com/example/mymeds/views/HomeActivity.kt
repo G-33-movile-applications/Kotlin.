@@ -4,79 +4,121 @@ import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.viewModels
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ExitToApp
-import androidx.compose.material.icons.filled.Notifications
-import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.Place
-import androidx.compose.material.icons.filled.ShoppingCart // 👈 nuevo ícono
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.mymeds.ui.theme.MyMedsTheme
-import androidx.compose.ui.tooling.preview.Preview
+import com.example.mymeds.viewModels.MainViewModel
+import com.example.mymeds.views.components.DrivingModeOverlay
 import com.google.firebase.auth.FirebaseAuth
 
-
 class HomeActivity : ComponentActivity() {
+    private val mainViewModel: MainViewModel by viewModels()
 
+    @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // Detecta si se está conduciendo
+        mainViewModel.startDrivingDetection(applicationContext)
+
         setContent {
             MyMedsTheme {
-                HomeScreen(
-                    onMapClick = { navigateToMap() },
-                    onUploadPrescriptionClick = { navigateToUploadPrescription() },
-                    onProfileClick = { navigateToProfile() },
-                    onNotificationsClick = { showNotifications() },
-                    onLogoutClick = { logout() },
-                    onOrdersClick = { navigateToOrders() } // 👈 nuevo callback
-                )
+                val isDriving by mainViewModel.isDriving.collectAsState()
+
+                Scaffold(
+                    floatingActionButton = {
+                        // Botón para simular conducción (solo debug)
+                        FloatingActionButton(
+                            onClick = { mainViewModel.toggleDrivingModeForDebug() },
+                            containerColor = MaterialTheme.colorScheme.tertiary,
+                            contentColor = MaterialTheme.colorScheme.onTertiary
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.DirectionsCar,
+                                contentDescription = "Toggle Driving Mode"
+                            )
+                        }
+                    },
+                    floatingActionButtonPosition = FabPosition.End
+                ) { innerPadding ->
+                    Box(
+                        modifier = Modifier
+                            .padding(innerPadding)
+                            .fillMaxSize()
+                    ) {
+                        HomeScreen(
+                            onMapClick = { navigateToMap() },
+
+                            // Bloqueadas si va conduciendo
+                            onUploadPrescriptionClick = { if (!isDriving) navigateToUploadPrescription() },
+                            onProfileClick = { if (!isDriving) navigateToProfile() },
+                            onOrdersClick = { if (!isDriving) navigateToOrders() },
+                            onPrescriptionsClick = { if (!isDriving) navigateToPrescriptions() },
+                            onAnalyticsClick = { if (!isDriving) navigateToAnalytics() },
+
+                            // Siempre disponibles
+                            onNotificationsClick = { showNotifications() },
+                            onLogoutClick = { logout() }
+                        )
+
+                        if (isDriving) {
+                            DrivingModeOverlay(
+                                message = "Por tu seguridad, algunas funciones están desactivadas mientras conduces."
+                            )
+                        }
+                    }
+                }
             }
         }
     }
 
     private fun navigateToMap() {
-        val intent = Intent(this, MapActivity::class.java)
-        startActivity(intent)
+        startActivity(Intent(this, MapActivity::class.java))
     }
 
     private fun navigateToUploadPrescription() {
-        val intent = Intent(this, UploadPrescriptionActivity::class.java)
-        startActivity(intent)
+        startActivity(Intent(this, UploadPrescriptionActivity::class.java))
     }
 
     private fun navigateToProfile() {
-        val intent = Intent(this, ProfileActivity::class.java)
-        startActivity(intent)
+        startActivity(Intent(this, ProfileActivity::class.java))
     }
 
     private fun navigateToOrders() {
-        // TODO: asegúrate de tener OrdersActivity creada en este mismo paquete (o ajusta el paquete)
-        val intent = Intent(this, OrdersManagementActivity::class.java)
-        startActivity(intent)
+        startActivity(Intent(this, OrdersManagementActivity::class.java))
+    }
+
+    private fun navigateToPrescriptions() {
+        startActivity(Intent(this, PrescriptionsActivity::class.java))
+    }
+
+    private fun navigateToAnalytics() {
+        startActivity(Intent(this, AnalyticsActivity::class.java))
     }
 
     private fun showNotifications() {
-        // Implementar lógica de notificaciones
+        // TODO: Implementar lógica de notificaciones
     }
 
     private fun logout() {
         FirebaseAuth.getInstance().signOut()
-        startActivity(Intent(this, LoginActivity::class.java)) // Ajusta si tu login se llama distinto
+        startActivity(Intent(this, LoginActivity::class.java))
         finish()
     }
 }
@@ -89,8 +131,14 @@ fun HomeScreen(
     onProfileClick: () -> Unit = {},
     onNotificationsClick: () -> Unit = {},
     onLogoutClick: () -> Unit = {},
-    onOrdersClick: () -> Unit = {} // 👈 nuevo parámetro
+    onOrdersClick: () -> Unit = {},
+    onPrescriptionsClick: () -> Unit = {},
+    onAnalyticsClick: () -> Unit = {} // NUEVO: icono de analíticas en la barra
 ) {
+    // Tabs: "Tus pedidos" / "Tus prescripciones"
+    val tabs = listOf("Tus pedidos", "Tus prescripciones")
+    var selectedTab by remember { mutableStateOf(0) }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -102,8 +150,15 @@ fun HomeScreen(
                         color = Color.White
                     )
                 },
-
                 actions = {
+                    // Icono de Analíticas (arriba a la derecha)
+                    IconButton(onClick = onAnalyticsClick) {
+                        Icon(
+                            imageVector = Icons.Filled.BarChart,
+                            contentDescription = "Analíticas",
+                            tint = Color.White
+                        )
+                    }
                     IconButton(onClick = onNotificationsClick) {
                         Icon(
                             imageVector = Icons.Filled.Notifications,
@@ -131,9 +186,84 @@ fun HomeScreen(
                 .padding(paddingValues)
                 .background(Color(0xFFF5F5F5))
                 .verticalScroll(rememberScrollState())
-                .padding(top = 16.dp)
         ) {
-            // Ver mapa de farmacias
+            // ===== Selector justo debajo del header =====
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFFCBDEF3)),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "Gestionar",
+                        fontSize = 12.sp,
+                        color = Color(0xFF5A7A9B),
+                        fontWeight = FontWeight.Medium,
+                        letterSpacing = 0.5.sp
+                    )
+                    Spacer(Modifier.height(8.dp))
+
+                    TabRow(
+                        selectedTabIndex = selectedTab,
+                        containerColor = Color(0xFFB3CEE8),
+                        contentColor = Color.Black,
+                        indicator = { /* sin indicador para estilo plano */ }
+                    ) {
+                        tabs.forEachIndexed { index, title ->
+                            Tab(
+                                selected = selectedTab == index,
+                                onClick = { selectedTab = index },
+                                text = {
+                                    Text(
+                                        title,
+                                        color = Color.Black,
+                                        fontWeight = if (selectedTab == index) FontWeight.Bold else FontWeight.Normal
+                                    )
+                                },
+                                icon = {
+                                    val icon: ImageVector =
+                                        if (index == 0) Icons.Filled.ShoppingCart else Icons.Filled.Description
+                                    Icon(icon, contentDescription = null, tint = Color.Black)
+                                },
+                                selectedContentColor = Color.Black,
+                                unselectedContentColor = Color.Black
+                            )
+                        }
+                    }
+
+                    Spacer(Modifier.height(12.dp))
+
+                    // CTA principal dependiente de la pestaña
+                    Button(
+                        onClick = { if (selectedTab == 0) onOrdersClick() else onPrescriptionsClick() },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.White),
+                        elevation = ButtonDefaults.buttonElevation(defaultElevation = 0.dp)
+                    ) {
+                        Icon(
+                            imageVector = if (selectedTab == 0) Icons.Filled.ShoppingCart else Icons.Filled.Description,
+                            contentDescription = null,
+                            tint = Color.Black
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = if (selectedTab == 0) "Ver pedidos" else "Ver prescripciones",
+                            color = Color.Black,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+            }
+
+            // ===== Resto de funcionalidades =====
+            Spacer(modifier = Modifier.height(4.dp))
             FunctionalityCard(
                 title = "Ver mapa de farmacias",
                 description = "Encuentra sucursales EPS cercanas, horarios y stock estimado.",
@@ -141,10 +271,7 @@ fun HomeScreen(
                 buttonText = "Abrir mapa",
                 onClick = onMapClick
             )
-
             Spacer(modifier = Modifier.height(16.dp))
-
-            // Subir prescripción
             FunctionalityCard(
                 title = "Sube tu prescripción",
                 description = "Escanea o carga la fórmula para validar y agilizar tu pedido.",
@@ -152,21 +279,7 @@ fun HomeScreen(
                 buttonText = "Subir",
                 onClick = onUploadPrescriptionClick
             )
-
             Spacer(modifier = Modifier.height(16.dp))
-
-            // 👇 Nuevo bloque: Gestionar pedidos
-            FunctionalityCard(
-                title = "Gestionar pedidos",
-                description = "Crea pedidos, revisa estados y descarga recibos.",
-                icon = Icons.Filled.ShoppingCart,
-                buttonText = "Ver pedidos",
-                onClick = onOrdersClick
-            )
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Perfil
             FunctionalityCard(
                 title = "Ver tu perfil",
                 description = "Datos del usuario, preferencias y accesibilidad.",
@@ -175,7 +288,6 @@ fun HomeScreen(
                 onClick = onProfileClick,
                 isAccount = true
             )
-
             Spacer(modifier = Modifier.height(24.dp))
         }
     }
@@ -218,9 +330,7 @@ fun FunctionalityCard(
                         color = Color(0xFF5A7A9B),
                         letterSpacing = 0.5.sp
                     )
-
                     Spacer(modifier = Modifier.height(8.dp))
-
                     Text(
                         text = title,
                         fontSize = 18.sp,
@@ -228,9 +338,7 @@ fun FunctionalityCard(
                         color = Color.Black,
                         lineHeight = 22.sp
                     )
-
                     Spacer(modifier = Modifier.height(8.dp))
-
                     Text(
                         text = description,
                         fontSize = 14.sp,
@@ -238,7 +346,6 @@ fun FunctionalityCard(
                         lineHeight = 20.sp
                     )
                 }
-
                 Icon(
                     imageVector = icon,
                     contentDescription = title,
@@ -248,9 +355,7 @@ fun FunctionalityCard(
                     tint = Color.White
                 )
             }
-
             Spacer(modifier = Modifier.height(16.dp))
-
             Button(
                 onClick = onClick,
                 modifier = Modifier.height(48.dp),

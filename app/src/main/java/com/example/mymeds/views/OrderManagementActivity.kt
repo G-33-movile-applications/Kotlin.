@@ -6,6 +6,10 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.location.Geocoder
 import android.location.Location
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
@@ -48,6 +52,8 @@ import com.google.android.gms.location.Priority
 import com.google.android.gms.tasks.CancellationTokenSource
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -62,15 +68,20 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 private const val TAG = "OrdersManagementActivity"
+private const val PENDING_ORDERS_KEY = "pending_orders_local"
 
 /**
  * ╔══════════════════════════════════════════════════════════════════════════╗
  * ║  PEDIDOS POR PRESCRIPCIÓN + INVENTARIO REAL DE FARMACIA                 ║
  * ║  GPS, carrito con tope por stock y checkout                             ║
+ * ║  + VERIFICACIÓN DE CONECTIVIDAD Y ALMACENAMIENTO LOCAL                  ║
  * ╚══════════════════════════════════════════════════════════════════════════╝
  *
  * Los medicamentos se obtienen de: /usuarios/{userId}/prescripcionesUsuario/{id}/medicamentosPrescripcion
  * Al seleccionar una farmacia se hace MERGE con su inventario para traer precio y stock reales.
+ *
+ * NUEVO: Si no hay internet, los pedidos se guardan localmente en SharedPreferences
+ * y se sincronizan automáticamente cuando se recupera la conexión.
  */
 
 // Paleta de colores
@@ -95,11 +106,26 @@ data class PrescriptionMedicationItem(
     val inventoryId: String? = null // 👈 NUEVO
 )
 
-
 // Agrupador prescripción + medicamentos
 data class PrescriptionWithMedications(
     val prescription: Prescription,
     val medications: List<PrescriptionMedicationItem>
+)
+
+/**
+ * 🆕 Modelo para pedidos pendientes guardados localmente
+ */
+data class PendingOrderData(
+    val cart: ShoppingCart,
+    val userId: String,
+    val pharmacyId: String,
+    val pharmacyName: String,
+    val pharmacyAddress: String,
+    val deliveryType: DeliveryType,
+    val deliveryAddress: String,
+    val phoneNumber: String,
+    val notes: String,
+    val timestamp: Long = System.currentTimeMillis()
 )
 
 class OrdersManagementActivity : ComponentActivity() {
@@ -113,10 +139,6 @@ class OrdersManagementActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
-
-        val pharmacyId = intent.getStringExtra("PHARMACY_ID")
-        val pharmacyName = intent.getStringExtra("PHARMACY_NAME")
-        val fromMap = intent.getBooleanExtra("FROM_MAP", false)
 
         setContent {
             MaterialTheme(
@@ -132,9 +154,7 @@ class OrdersManagementActivity : ComponentActivity() {
                 EnhancedOrdersManagementScreen(
                     vm = vm,
                     fusedLocationClient = fusedLocationClient,
-                    finish = { finish() },
-                    preselectedPharmacyId = pharmacyId,
-                    fromMap = fromMap
+                    finish = { finish() }
                 )
             }
         }
@@ -170,6 +190,11 @@ class EnhancedOrdersViewModel(
     private val firestore = FirebaseFirestore.getInstance()
     private val auth = FirebaseAuth.getInstance()
 
+    // 🆕 Gestor de conectividad
+    private val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+    private val gson = Gson()
+    private val sharedPrefs = context.getSharedPreferences("orders_prefs", Context.MODE_PRIVATE)
+
     private val _uiState = MutableStateFlow<OrderUiState>(OrderUiState.Loading)
     val uiState: StateFlow<OrderUiState> = _uiState.asStateFlow()
 
@@ -200,14 +225,182 @@ class EnhancedOrdersViewModel(
     private val _userOrders = MutableStateFlow<List<MedicationOrder>>(emptyList())
     val userOrders: StateFlow<List<MedicationOrder>> = _userOrders.asStateFlow()
 
+    // 🆕 Estado de conectividad
+    private val _isConnected = MutableStateFlow(false)
+    val isConnected: StateFlow<Boolean> = _isConnected.asStateFlow()
+
+    // 🆕 Pedidos pendientes de sincronización
+    private val _pendingOrdersCount = MutableStateFlow(0)
+    val pendingOrdersCount: StateFlow<Int> = _pendingOrdersCount.asStateFlow()
+
     var isLoading by mutableStateOf(false)
         private set
 
     init {
         Log.d(TAG, "🎯 EnhancedOrdersViewModel inicializado")
+
+        // 🆕 Inicializar monitoreo de conectividad
+        initConnectivityMonitoring()
+        checkInitialConnectivity()
+
         loadNearbyPharmacies()
         loadUserPrescriptions()
         loadUserOrders()
+
+        // 🆕 Cargar contador de pedidos pendientes
+        updatePendingOrdersCount()
+    }
+
+    /**
+     * 🆕 Inicializa el monitoreo de cambios en la conectividad de red
+     */
+    private fun initConnectivityMonitoring() {
+        val networkRequest = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .build()
+
+        val networkCallback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                Log.d(TAG, "🌐 Red disponible")
+                _isConnected.value = true
+                // 🆕 Intentar sincronizar pedidos pendientes cuando se recupera la conexión
+                syncPendingOrders()
+            }
+
+            override fun onLost(network: Network) {
+                Log.d(TAG, "📡 Red perdida")
+                _isConnected.value = false
+            }
+        }
+
+        connectivityManager.registerNetworkCallback(networkRequest, networkCallback)
+    }
+
+    /**
+     * 🆕 Verifica el estado inicial de conectividad
+     */
+    private fun checkInitialConnectivity() {
+        _isConnected.value = isNetworkAvailable()
+        Log.d(TAG, "🔍 Estado inicial de conectividad: ${_isConnected.value}")
+    }
+
+    /**
+     * 🆕 Verifica si hay conexión a internet disponible
+     */
+    private fun isNetworkAvailable(): Boolean {
+        val network = connectivityManager.activeNetwork ?: return false
+        val capabilities = connectivityManager.getNetworkCapabilities(network) ?: return false
+        return capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+    }
+
+    /**
+     * 🆕 Guarda un pedido localmente cuando no hay conexión
+     */
+    private fun savePendingOrderLocally(orderData: PendingOrderData) {
+        try {
+            val existingOrders = loadPendingOrders().toMutableList()
+            existingOrders.add(orderData)
+
+            val json = gson.toJson(existingOrders)
+            sharedPrefs.edit().putString(PENDING_ORDERS_KEY, json).apply()
+
+            updatePendingOrdersCount()
+
+            Log.d(TAG, "💾 Pedido guardado localmente. Total pendientes: ${existingOrders.size}")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error guardando pedido localmente", e)
+        }
+    }
+
+    /**
+     * 🆕 Carga los pedidos pendientes desde SharedPreferences
+     */
+    private fun loadPendingOrders(): List<PendingOrderData> {
+        return try {
+            val json = sharedPrefs.getString(PENDING_ORDERS_KEY, null) ?: return emptyList()
+            val type = object : TypeToken<List<PendingOrderData>>() {}.type
+            gson.fromJson(json, type) ?: emptyList()
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error cargando pedidos pendientes", e)
+            emptyList()
+        }
+    }
+
+    /**
+     * 🆕 Actualiza el contador de pedidos pendientes
+     */
+    private fun updatePendingOrdersCount() {
+        _pendingOrdersCount.value = loadPendingOrders().size
+    }
+
+    /**
+     * 🆕 Sincroniza los pedidos pendientes cuando hay conexión
+     */
+    private fun syncPendingOrders() {
+        viewModelScope.launch {
+            val pendingOrders = loadPendingOrders()
+            if (pendingOrders.isEmpty()) {
+                Log.d(TAG, "✅ No hay pedidos pendientes para sincronizar")
+                return@launch
+            }
+
+            Log.d(TAG, "🔄 Sincronizando ${pendingOrders.size} pedidos pendientes...")
+
+            val successfulOrders = mutableListOf<PendingOrderData>()
+
+            pendingOrders.forEach { orderData ->
+                try {
+                    // Intentar crear el pedido en el servidor
+                    val pharmacy = PhysicalPoint(
+                        id = orderData.pharmacyId,
+                        name = orderData.pharmacyName,
+                        address = orderData.pharmacyAddress,
+                        location = com.google.firebase.firestore.GeoPoint(0.0, 0.0),
+                        phone = "",
+                        openingHours = ""
+                    )
+
+                    val result = ordersRepository.createOrder(
+                        cart = orderData.cart,
+                        userId = orderData.userId,
+                        pharmacy = pharmacy,
+                        deliveryType = orderData.deliveryType,
+                        deliveryAddress = orderData.deliveryAddress,
+                        phoneNumber = orderData.phoneNumber,
+                        notes = "${orderData.notes} [Sincronizado automáticamente]"
+                    )
+
+                    if (result.isSuccess) {
+                        successfulOrders.add(orderData)
+                        Log.d(TAG, "✅ Pedido sincronizado exitosamente")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "❌ Error sincronizando pedido: ${e.message}")
+                }
+            }
+
+            // Eliminar los pedidos que se sincronizaron exitosamente
+            if (successfulOrders.isNotEmpty()) {
+                val remainingOrders = pendingOrders.filterNot { it in successfulOrders }
+                val json = gson.toJson(remainingOrders)
+                sharedPrefs.edit().putString(PENDING_ORDERS_KEY, json).apply()
+
+                updatePendingOrdersCount()
+                loadUserOrders()
+
+                Log.d(TAG, "✅ ${successfulOrders.size} pedidos sincronizados. Pendientes: ${remainingOrders.size}")
+            }
+        }
+    }
+
+    /**
+     * 🆕 Limpia manualmente los pedidos pendientes (útil para testing o limpieza)
+     */
+    fun clearPendingOrders() {
+        sharedPrefs.edit().remove(PENDING_ORDERS_KEY).apply()
+        updatePendingOrdersCount()
+        Log.d(TAG, "🗑️ Pedidos pendientes eliminados")
     }
 
     fun loadNearbyPharmacies() {
@@ -237,9 +430,6 @@ class EnhancedOrdersViewModel(
                 _uiState.value = OrderUiState.Error(e.message ?: "Error desconocido")
             }
         }
-    } catch (e: Exception) {
-        Log.e(TAG, "❌ [Draft] Error leyendo $path", e)
-        null
     }
 
     @RequiresApi(Build.VERSION_CODES.O)
@@ -333,7 +523,6 @@ class EnhancedOrdersViewModel(
         }
     }
 
-
     fun updateUserLocation(location: Location) {
         viewModelScope.launch {
             _userLocation.value = location
@@ -374,7 +563,6 @@ class EnhancedOrdersViewModel(
         return R * c
     }
 
-    /** ------------------ MERGE con inventario de farmacia ------------------ **/
     /** ------------------ MERGE con inventario de farmacia (por nombre) ------------------ **/
     private fun mergePrescriptionWithInventory(
         meds: List<PrescriptionMedicationItem>,
@@ -408,8 +596,6 @@ class EnhancedOrdersViewModel(
             } else pm
         }
     }
-
-
 
     /** Selecciona prescripción y farmacia, y fusiona con inventario */
     fun selectPrescription(prescriptionWithMeds: PrescriptionWithMedications, pharmacy: PhysicalPoint) {
@@ -490,7 +676,6 @@ class EnhancedOrdersViewModel(
         Log.d(TAG, "🛒 ${medication.name} x$q (stock=$stock) [invId=$inventoryId]")
     }
 
-
     fun updateCartItemQuantity(medicationId: String, newQuantity: Int) {
         val current = _cart.value
         val item = current.items.find { it.medicationId == medicationId } ?: return
@@ -512,6 +697,10 @@ class EnhancedOrdersViewModel(
         )
     }
 
+    /**
+     * 🆕 Crea un pedido verificando primero la conectividad
+     * Si no hay internet, guarda el pedido localmente para sincronización posterior
+     */
     fun createOrder(
         deliveryType: DeliveryType,
         deliveryAddress: String,
@@ -522,18 +711,46 @@ class EnhancedOrdersViewModel(
     ) {
         val userId = auth.currentUser?.uid
         if (userId == null) {
-            onError("Usuario no autenticado"); return
+            onError("Usuario no autenticado")
+            return
         }
         val pharmacy = _selectedPharmacy.value
         if (pharmacy == null) {
-            onError("No hay farmacia seleccionada"); return
+            onError("No hay farmacia seleccionada")
+            return
         }
         val currentCart = _cart.value
         if (currentCart.isEmpty()) {
-            onError("El carrito está vacío"); return
+            onError("El carrito está vacío")
+            return
         }
-    }
 
+        // 🆕 Verificar conectividad antes de proceder
+        if (!isNetworkAvailable()) {
+            Log.w(TAG, "⚠️ Sin conexión a internet. Guardando pedido localmente...")
+
+            // Guardar el pedido localmente
+            val pendingOrder = PendingOrderData(
+                cart = currentCart,
+                userId = userId,
+                pharmacyId = pharmacy.id,
+                pharmacyName = pharmacy.name,
+                pharmacyAddress = pharmacy.address,
+                deliveryType = deliveryType,
+                deliveryAddress = deliveryAddress,
+                phoneNumber = phoneNumber,
+                notes = notes
+            )
+
+            savePendingOrderLocally(pendingOrder)
+            clearCart()
+
+            // Notificar al usuario
+            onError("📡 Sin conexión a internet.\n\n✅ Tu pedido se ha guardado localmente y se enviará automáticamente cuando recuperes la conexión.\n\n💾 Pedidos pendientes de sincronización: ${_pendingOrdersCount.value}")
+            return
+        }
+
+        // Si hay conexión, proceder normalmente
         viewModelScope.launch {
             try {
                 isLoading = true
@@ -578,6 +795,13 @@ class EnhancedOrdersViewModel(
 
     fun cancelOrder(orderId: String, onSuccess: () -> Unit, onError: (String) -> Unit) {
         val userId = auth.currentUser?.uid ?: return
+
+        // 🆕 Verificar conectividad antes de cancelar
+        if (!isNetworkAvailable()) {
+            onError("📡 Sin conexión a internet. No se puede cancelar el pedido en este momento.")
+            return
+        }
+
         viewModelScope.launch {
             try {
                 isLoading = true
@@ -614,18 +838,17 @@ class EnhancedOrdersViewModelFactory(
 // UI
 // ═══════════════════════════════════════════════════════════════════════════
 
+@RequiresApi(Build.VERSION_CODES.O)
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun EnhancedOrdersManagementScreen(
     vm: EnhancedOrdersViewModel,
     fusedLocationClient: FusedLocationProviderClient,
-    finish: () -> Unit,
-    preselectedPharmacyId: String? = null,
-    fromMap: Boolean = false
+    finish: () -> Unit
 ) {
     val context = LocalContext.current
 
-    var selectedTab by remember { mutableStateOf(if (fromMap) 0 else 0) }
+    var selectedTab by remember { mutableStateOf(0) }
     var showCartSheet by remember { mutableStateOf(false) }
     var showCheckoutDialog by remember { mutableStateOf(false) }
 
@@ -639,20 +862,9 @@ fun EnhancedOrdersManagementScreen(
     val uiState by vm.uiState.collectAsState()
     val detectedAddress by vm.detectedAddress.collectAsState()
 
-
-    LaunchedEffect(preselectedPharmacyId, nearbyPharmacies) {
-        if (fromMap && preselectedPharmacyId != null && nearbyPharmacies.isNotEmpty()) {
-            val pharmacy = nearbyPharmacies.find { it.pharmacy.id == preselectedPharmacyId }
-            if (pharmacy != null) {
-
-                Toast.makeText(
-                    context,
-                    "Farmacia '${pharmacy.pharmacy.name}' seleccionada. Por favor elige una prescripción.",
-                    Toast.LENGTH_LONG
-                ).show()
-            }
-        }
-    }
+    // 🆕 Estados de conectividad
+    val isConnected by vm.isConnected.collectAsState()
+    val pendingOrdersCount by vm.pendingOrdersCount.collectAsState()
 
     val locationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -685,17 +897,31 @@ fun EnhancedOrdersManagementScreen(
         }
     }
 
-
-
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {
-                    Text(
-                        if (selectedPrescription != null) "Medicamentos de Prescripción"
-                        else "Gestión de Pedidos",
-                        fontWeight = FontWeight.Bold
-                    )
+                    Column {
+                        Text(
+                            if (selectedPrescription != null) "Medicamentos de Prescripción"
+                            else "Gestión de Pedidos",
+                            fontWeight = FontWeight.Bold
+                        )
+                        // 🆕 Mostrar estado de conectividad
+                        if (!isConnected) {
+                            Text(
+                                "📡 Sin conexión",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFFFF5252)
+                            )
+                        } else if (pendingOrdersCount > 0) {
+                            Text(
+                                "⏳ $pendingOrdersCount pedido(s) pendiente(s)",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFFFF9800)
+                            )
+                        }
+                    }
                 },
                 navigationIcon = {
                     IconButton(onClick = {
@@ -783,7 +1009,6 @@ fun EnhancedOrdersManagementScreen(
                             prescriptions = userPrescriptions,
                             pharmacies = nearbyPharmacies,
                             uiState = uiState,
-                            preselectedPharmacyId = if (fromMap) preselectedPharmacyId else null,
                             onSelectPrescription = { prescription, pharmacy ->
                                 vm.selectPrescription(prescription, pharmacy)
                             }
@@ -840,6 +1065,7 @@ fun EnhancedOrdersManagementScreen(
             cart = cart,
             pharmacy = selectedPharmacy ?: return,
             detectedAddress = detectedAddress,
+            isConnected = isConnected, // 🆕 Pasar estado de conectividad
             onDismiss = { showCheckoutDialog = false },
             onConfirm = { deliveryType, address, phone, notes ->
                 vm.createOrder(
@@ -853,7 +1079,8 @@ fun EnhancedOrdersManagementScreen(
                         vm.deselectPrescription()
                     },
                     onError = { error ->
-                        Toast.makeText(context, "❌ Error: $error", Toast.LENGTH_LONG).show()
+                        showCheckoutDialog = false
+                        Toast.makeText(context, error, Toast.LENGTH_LONG).show()
                     }
                 )
             }
@@ -889,18 +1116,10 @@ fun PrescriptionsListTab(
     prescriptions: List<PrescriptionWithMedications>,
     pharmacies: List<PharmacyWithDistance>,
     uiState: OrderUiState,
-    onSelectPrescription: (PrescriptionWithMedications, PhysicalPoint) -> Unit,
-    preselectedPharmacyId: String? = null
+    onSelectPrescription: (PrescriptionWithMedications, PhysicalPoint) -> Unit
 ) {
     var selectedPrescriptionForPharmacy by remember { mutableStateOf<PrescriptionWithMedications?>(null) }
     var showPharmacySelector by remember { mutableStateOf(false) }
-
-
-    val preselectedPharmacy = remember(preselectedPharmacyId, pharmacies) {
-        if (preselectedPharmacyId != null) {
-            pharmacies.find { it.pharmacy.id == preselectedPharmacyId }?.pharmacy
-        } else null
-    }
 
     when (uiState) {
         is OrderUiState.Loading -> {
@@ -932,40 +1151,12 @@ fun PrescriptionsListTab(
                     contentPadding = PaddingValues(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    // 🔥 Mostrar mensaje si hay farmacia preseleccionada
-                    if (preselectedPharmacy != null) {
-                        item {
-                            Card(
-                                modifier = Modifier.fillMaxWidth(),
-                                colors = CardDefaults.cardColors(containerColor = CustomBlue1)
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(12.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Icon(Icons.Filled.LocalPharmacy, null, tint = CustomBlue2)
-                                    Spacer(Modifier.width(8.dp))
-                                    Text(
-                                        "Farmacia seleccionada: ${preselectedPharmacy.name}",
-                                        style = MaterialTheme.typography.titleSmall,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
-                            }
-                        }
-                    }
-
                     items(prescriptions) { item ->
                         PrescriptionCard(
                             prescriptionWithMeds = item,
                             onClick = {
-                                // 🔥 Si hay farmacia preseleccionada, ir directo
-                                if (preselectedPharmacy != null) {
-                                    onSelectPrescription(item, preselectedPharmacy)
-                                } else {
-                                    selectedPrescriptionForPharmacy = item
-                                    showPharmacySelector = true
-                                }
+                                selectedPrescriptionForPharmacy = item
+                                showPharmacySelector = true
                             }
                         )
                     }
@@ -1541,12 +1732,16 @@ fun CartItemCard(
     }
 }
 
+/**
+ * 🆕 CheckoutDialog actualizado con indicador de conectividad
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CheckoutDialog(
     cart: ShoppingCart,
     pharmacy: PhysicalPoint,
     detectedAddress: String,
+    isConnected: Boolean, // 🆕 Nuevo parámetro
     onDismiss: () -> Unit,
     onConfirm: (DeliveryType, String, String, String) -> Unit
 ) {
@@ -1557,13 +1752,53 @@ fun CheckoutDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Confirmar Pedido") },
+        title = {
+            Column {
+                Text("Confirmar Pedido")
+                // 🆕 Mostrar advertencia si no hay conexión
+                if (!isConnected) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "⚠️ Sin conexión. El pedido se guardará localmente",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color(0xFFFF9800)
+                    )
+                }
+            }
+        },
         text = {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .verticalScroll(rememberScrollState())
             ) {
+                // 🆕 Mensaje informativo sobre modo offline
+                if (!isConnected) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFFFF9800).copy(alpha = 0.1f))
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Filled.Warning,
+                                null,
+                                tint = Color(0xFFFF9800),
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "Tu pedido se guardará localmente y se enviará automáticamente cuando recuperes la conexión a internet.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color(0xFFFF9800)
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(12.dp))
+                }
+
                 Card(colors = CardDefaults.cardColors(containerColor = CustomBlue3)) {
                     Column(modifier = Modifier.padding(12.dp)) {
                         Text("Resumen del Pedido", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
@@ -1675,7 +1910,12 @@ fun CheckoutDialog(
                         (selectedDeliveryType == DeliveryType.HOME_DELIVERY && address.isNotBlank())) &&
                         phoneNumber.isNotBlank(),
                 colors = ButtonDefaults.buttonColors(containerColor = CustomBlue2)
-            ) { Text("Confirmar Pedido", color = Color.White) }
+            ) {
+                Text(
+                    if (isConnected) "Confirmar Pedido" else "Guardar Localmente",
+                    color = Color.White
+                )
+            }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar", color = CustomBlue2) } }
     )
@@ -1797,4 +2037,3 @@ fun OrderStatusBadge(status: OrderStatus) {
         Text(text, modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp), style = MaterialTheme.typography.labelSmall, color = color, fontWeight = FontWeight.SemiBold)
     }
 }
-
